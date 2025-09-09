@@ -79,7 +79,8 @@ class AutomacaoPedidos:
 
     def _fazer_login(self):
         print("\n---> Acessando a página de login.")
-        self.driver.get("site cliente")
+        # ATENÇÃO: Substitua pela URL correta do portal do cliente.
+        self.driver.get("https://portal.cliente.exemplo.com/login")
         self._verificar_parada()
         try:
             # --- Preenchendo o formulário de login ---
@@ -248,6 +249,7 @@ class AutomacaoPedidos:
                 print("Acessada a nova janela do PDF.")
 
                 # ---> Iniciando clique no botão de download dentro do PDF
+                # ATENÇÃO: O seletor 'baseSvg' pode ser específico. Mantenha se funcionar.
                 campo_download = "baseSvg"
                 botao_download = self._find_first_element(campo_download)
                 botao_download.click()

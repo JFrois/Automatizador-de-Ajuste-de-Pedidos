@@ -41,6 +41,7 @@ def encontra_ultimo_arquivo(folder_path, base_name):
         print(f"Erro ao encontrar último arquivo de log: {e}")
         return None
 
+
 # ---> Função para criar o próximo arquivo de log
 def cria_proximo_arquivo(folder_path, base_name):
     # ---> Gera o nome para o próximo arquivo de log sequencial.
@@ -61,11 +62,13 @@ def cria_proximo_arquivo(folder_path, base_name):
         print(f"Erro ao criar próximo arquivo de log: {e}")
         return os.path.join(folder_path, f"{base_name}1.csv")
 
+
 # ===> Classe para o tratamento dos dados dos arquivos PDF
 class tratamentoDados:
     def __init__(self):
         self.user = os.getlogin()
-        self.user_mail = f"{self.user}@gmail.com"
+        # MODIFICADO: E-mail padrão agora usa um placeholder de domínio.
+        self.user_mail = f"{self.user}@suaempresa.com"
         self.cc_mail = ""
         self.caminho_pasta_pdf = ""
         self.caminho_saida_excel = ""
@@ -142,10 +145,12 @@ class tratamentoDados:
         try:
             texto_completo = "\n".join(conteudo_linhas)
 
+            # ATENÇÃO: Os nomes das cidades são específicos para o seu cliente/empresa.
+            # Altere "CidadeA" e "CidadeB" para os nomes corretos encontrados nos seus PDFs.
             linha_cidade = next(
-                (l for l in conteudo_linhas if "Vinhedo" in l or "Resende" in l), ""
+                (l for l in conteudo_linhas if "CidadeA" in l or "CidadeB" in l), ""
             )
-            cidade = "Vinhedo" if "Vinhedo" in linha_cidade else "Resende"
+            cidade = "CidadeA" if "CidadeA" in linha_cidade else "CidadeB"
             print(f"PDF da loja de {cidade}\n")
 
             alteracao_pedido = any("Amendment" in linha for linha in conteudo_linhas)
@@ -402,11 +407,12 @@ class tratamentoDados:
         except Exception as e:
             print(f"Erro de processamento no arquivo {nome_arquivo}. Erro: {e}")
             self.pedidos_falha.add(nome_arquivo)
+            # ATENÇÃO: Lógica de fallback com nomes de cidades
             linha_cidade_fallback = next(
-                (l for l in conteudo_linhas if "Vinhedo" in l or "Resende" in l), ""
+                (l for l in conteudo_linhas if "CidadeA" in l or "CidadeB" in l), ""
             )
             cidade_extraida = (
-                "Vinhedo" if "Vinhedo" in linha_cidade_fallback else "Resende"
+                "CidadeA" if "CidadeA" in linha_cidade_fallback else "CidadeB"
             )
             self._mover_arquivo_processado(nome_arquivo, cidade_extraida, sucesso=False)
             traceback.print_exc()
@@ -562,7 +568,8 @@ class tratamentoDados:
                     else f"{qtde_falha} arquivos falharam."
                 )
                 html_body += f"<p><b>{texto_falha}</b></p>"
-            html_body += "<p>Att,<br>Bot VOSS</p>"
+            # MODIFICADO: Assinatura de e-mail genérica
+            html_body += "<p>Att,<br>Bot de Automação</p>"
             mail.HTMLBody = html_body
             mail.Send()
             print("Email de status enviado com sucesso!")
@@ -571,6 +578,7 @@ class tratamentoDados:
             messagebox.showerror(
                 "Erro de Email", f"Não foi possível enviar o e-mail: {e}"
             )
+
 
 # ===> Classe da Interface Gráfica
 class App(ctk.CTk):
@@ -634,8 +642,8 @@ class App(ctk.CTk):
         self.entry_codigo.grid(row=2, column=1, padx=10, pady=(10, 5), sticky="ew")
         self.entry_codigo.insert(0, "")
 
-        # ---> Campo de entrada para e-mail VOSS
-        ctk.CTkLabel(inputs_frame, text="E-mail:", font=status_font).grid(
+        # MODIFICADO: Rótulo do campo de e-mail genérico
+        ctk.CTkLabel(inputs_frame, text="E-mail (em cópia):", font=status_font).grid(
             row=3, column=0, padx=10, pady=(10, 5), sticky="w"
         )
         self.entry_email = ctk.CTkEntry(inputs_frame, font=status_font)
@@ -681,7 +689,7 @@ class App(ctk.CTk):
             text="2. Processar PDFs Baixados",
             font=self.btn_font,
             height=50,
-            fg_color="#4CAF50",  
+            fg_color="#4CAF50",
             hover_color="#45a049",
             command=self.iniciar_processamento,
         )
@@ -829,6 +837,7 @@ class App(ctk.CTk):
         if pasta_selecionada:
             self.entry_pdf_path.delete(0, ctk.END)
             self.entry_pdf_path.insert(0, pasta_selecionada)
+
 
 # ---> Looping aplicativo
 if __name__ == "__main__":
