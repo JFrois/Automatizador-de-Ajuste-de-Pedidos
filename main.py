@@ -1,11 +1,6 @@
-# ============================================================ #
-# ------------------------------------------------------------ #
-# ===> PASSO A PASSO DO NOSSO SCRIPT PARA AJUSTE DE PREÇO <=== #
-# ------------------------------------------------------------ #
-# ============================================================ #
-
 # ---> 0. Importar as bibliotecas necessárias
-from datetime import datetime
+from datetime import datetime, time
+from time import strftime
 import traceback
 import pandas as pd
 import PyPDF2
@@ -18,6 +13,7 @@ import threading
 import pythoncom
 import shutil
 from tkinter import filedialog
+# SENSÍVEL: O nome do arquivo de automação foi mantido, mas certifique-se de que ele não contém informações sensíveis.
 from acessar_site_pedidos import AutomacaoPedidos
 
 
@@ -67,48 +63,77 @@ def cria_proximo_arquivo(folder_path, base_name):
 class tratamentoDados:
     def __init__(self):
         self.user = os.getlogin()
-        # MODIFICADO: E-mail padrão agora usa um placeholder de domínio.
-        self.user_mail = f"{self.user}@suaempresa.com"
+        # SENSÍVEL: Domínio de e-mail genérico. Altere para o seu domínio se necessário.
+        self.user_mail = f"{self.user}@sua_empresa.com"
         self.cc_mail = ""
         self.caminho_pasta_pdf = ""
         self.caminho_saida_excel = ""
-        self.caminho_log = r""
+        # SENSÍVEL: Caminho de rede interno substituído por um caminho local genérico.
+        # Altere para o caminho de logs da sua aplicação.
+        self.caminho_log = r"C:\RPA\Logs"
         self.dados_extraidos = []
         self.pedidos_sucesso = set()
         self.pedidos_falha = set()
+        self.pedidos_existentes = set()
 
     # Processamento dos arquivos que já estão na pasta
-    def processar_arquivos_baixados(self):
-        self.dados_extraidos.clear()
-        self.pedidos_sucesso.clear()
-        self.pedidos_falha.clear()
+    def processar_arquivos_baixados(self, evento_parar):
+        pythoncom.CoInitialize()
+        try:
+            self.dados_extraidos.clear()
+            self.pedidos_sucesso.clear()
+            self.pedidos_falha.clear()
+            self.pedidos_existentes.clear()
 
-        arquivos_pdf = [
-            f for f in os.listdir(self.caminho_pasta_pdf) if f.lower().endswith(".pdf")
-        ]
-        if not arquivos_pdf:
-            return False, "Nenhum arquivo PDF encontrado na pasta para processar."
-
-        for nome_arquivo in arquivos_pdf:
-            caminho_completo = os.path.join(self.caminho_pasta_pdf, nome_arquivo)
-            conteudo_linhas = self.extrair_texto_pdf(caminho_completo)
-            if conteudo_linhas:
-                self.processar_conteudo(conteudo_linhas, nome_arquivo)
-            else:
-                self.pedidos_falha.add(nome_arquivo)
-                self._mover_arquivo_processado(
-                    nome_arquivo, "Falha_Extracao", sucesso=False
+            arquivos_pdf = [
+                f
+                for f in os.listdir(self.caminho_pasta_pdf)
+                if f.lower().endswith(".pdf")
+            ]
+            quantidade_final = 0
+            if not arquivos_pdf:
+                return (
+                    False,
+                    "Nenhum arquivo PDF encontrado na pasta para processar.",
+                    quantidade_final,
                 )
 
-        self.exportar_para_excel()
-        self.enviar_email()
-
-        if self.pedidos_falha:
-            return (
-                False,
-                f"{len(self.pedidos_falha)} arquivo(s) falharam no processamento.",
+            for nome_arquivo in arquivos_pdf:
+                if evento_parar.is_set():
+                    print("Processamento interrompido pelo usuário.")
+                    break
+                caminho_completo = os.path.join(self.caminho_pasta_pdf, nome_arquivo)
+                conteudo_linhas = self.extrair_texto_pdf(caminho_completo)
+                if conteudo_linhas:
+                    self.processar_conteudo(conteudo_linhas, nome_arquivo)
+                else:
+                    self.pedidos_falha.add(nome_arquivo)
+                    self._mover_arquivo_processado(
+                        nome_arquivo, "Falha_Extracao", sucesso=False
+                    )
+            total_pedidos = (
+                len(self.pedidos_sucesso)
+                + len(self.pedidos_falha)
+                + len(self.pedidos_existentes)
             )
-        return True, "Todos os arquivos foram processados com sucesso."
+            quantidade_final = total_pedidos
+
+            self.exportar_para_excel()
+            self.enviar_email()
+
+            if self.pedidos_falha:
+                return (
+                    False,
+                    f"{len(self.pedidos_falha)} arquivo(s) falharam no processamento.",
+                    quantidade_final,
+                )
+            return (
+                True,
+                "Todos os arquivos foram processados com sucesso.",
+                quantidade_final,
+            )
+        finally:
+            pythoncom.CoUninitialize()
 
     # ---> 2. Extrai o texto de UM arquivo PDF
     def extrair_texto_pdf(self, caminho_arquivo):
@@ -132,266 +157,341 @@ class tratamentoDados:
             caminho_origem = os.path.join(self.caminho_pasta_pdf, nome_arquivo)
             pasta_destino = os.path.join(self.caminho_pasta_pdf, cidade, pasta_status)
             os.makedirs(pasta_destino, exist_ok=True)
+
+            caminho_final_arquivo = os.path.join(pasta_destino, nome_arquivo)
+            if os.path.exists(caminho_final_arquivo):
+                print(
+                    f"AVISO: Arquivo '{nome_arquivo}' já existe no destino. Não será movido."
+                )
+                if nome_arquivo in self.pedidos_sucesso:
+                    self.pedidos_sucesso.remove(nome_arquivo)
+                self.pedidos_existentes.add(nome_arquivo)
+                os.remove(caminho_origem)
+                return
+
             shutil.move(caminho_origem, pasta_destino)
             print(f"Arquivo '{nome_arquivo}' movido para a pasta '{pasta_status}'.")
+
         except Exception as e:
             print(f"ERRO ao tentar mover o arquivo '{nome_arquivo}': {e}")
             if nome_arquivo in self.pedidos_sucesso:
                 self.pedidos_sucesso.remove(nome_arquivo)
             self.pedidos_falha.add(nome_arquivo)
 
+    @staticmethod
+    # ---> Função: extrair_preco
+    def extrair_preco(texto):
+        if not texto:
+            return 0.0
+        match = re.search(r"(\d{1,4}(?:[ .]\d{3})*[,.]\d{2})", texto)
+        if not match:
+            match = re.search(r"(\d+[,.]\d{2})", texto)
+            if not match:
+                return 0.0
+        numero_str = match.group(1)
+        num_limpo = re.sub(r"[. ]", "", numero_str[:-3]) + numero_str[-3:].replace(
+            ",", "."
+        )
+        try:
+            return float(num_limpo)
+        except ValueError:
+            return 0.0
+
+    @staticmethod
+    def extrair_quantidade_principal(texto):
+        if not texto:
+            return 0
+        # Procura por um ou mais dígitos seguidos de "PCS"
+        match = re.search(r"(\d+)\s*PCS", texto, re.I)
+        if match:
+            return int(match.group(1))
+        return 0  # Retorna 0 se não encontrar
+
+    @staticmethod
+    # ---> Função: extrair_quantidade
+    def extrair_quantidade(texto):
+        if not texto:
+            return 1
+        match = re.search(r"per\s*(\d+)", texto, re.I)
+        if match:
+            return int(match.group(1))
+        partes = texto.split()
+        for i, parte in enumerate(partes):
+            if re.search(r"\d+[,.]\d{2}$", parte):
+                if (i + 1) < len(partes) and partes[i + 1].isdigit():
+                    return int(partes[i + 1])
+        match = re.search(r"(\d+)\s*BRL", texto, re.I)
+        if match:
+            return int(match.group(1))
+        return 1
+
     # ---> 4. Processa o conteúdo extraído de UM PDF
     def processar_conteudo(self, conteudo_linhas, nome_arquivo):
         try:
             texto_completo = "\n".join(conteudo_linhas)
 
-            # ATENÇÃO: Os nomes das cidades são específicos para o seu cliente/empresa.
-            # Altere "CidadeA" e "CidadeB" para os nomes corretos encontrados nos seus PDFs.
+            # SENSÍVEL: Nomes de cidades substituídos por placeholders.
+            # Altere "Cidade A" e "Cidade B" para as palavras-chave que identificam a localidade nos seus PDFs.
             linha_cidade = next(
-                (l for l in conteudo_linhas if "CidadeA" in l or "CidadeB" in l), ""
+                (l for l in conteudo_linhas if "Cidade A" in l or "Cidade B" in l), ""
             )
-            cidade = "CidadeA" if "CidadeA" in linha_cidade else "CidadeB"
+            cidade = "Cidade A" if "Cidade A" in linha_cidade else "Cidade B"
             print(f"PDF da loja de {cidade}\n")
+            dados = {"Arquivo": nome_arquivo, "Cidade": cidade}
+
+            codigo_pedido_completo = "Não Encontrado"
+            # NOTE: Esta expressão regular busca por um padrão de número de pedido específico.
+            # Pode precisar de ajuste dependendo do formato dos seus documentos.
+            match_pedido_obj = re.search(
+                r"Purchase Order No\.\s*\n\s*([A-Z]\s*\d+\s*\d+)",
+                texto_completo,
+                re.DOTALL,
+            )
+            if not match_pedido_obj:
+                match_pedido_obj = re.search(r"([A-Z]\s*\d{2}\s*\d{6})", texto_completo)
+
+            if match_pedido_obj:
+                codigo_pedido_completo = re.sub(r"\s", "", match_pedido_obj.group(1))
+
+            dados["Codigo pedido"] = codigo_pedido_completo
+
+            dados["Codigo peça"] = (
+                nome_arquivo.split("_")[0] if nome_arquivo else "Não Encontrado"
+            )
+            dados_foram_extraidos = False
 
             alteracao_pedido = any("Amendment" in linha for linha in conteudo_linhas)
             is_price_update = (
                 "PRICE CHANGE" in texto_completo or "PRICE ADJUSTMENT" in texto_completo
             )
 
-            # ---> Função: extrair_preco
-            def extrair_preco(texto):
-                if not texto:
-                    return 0.0
-                match = re.search(r"(\d{1,4}(?:[ .]\d{3})*[,.]\d{2})", texto)
-                if not match:
-                    match = re.search(r"(\d+[,.]\d{2})", texto)
-                    if not match:
-                        return 0.0
-                numero_str = match.group(1)
-                num_limpo = re.sub(r"[. ]", "", numero_str[:-3]) + numero_str[
-                    -3:
-                ].replace(",", ".")
-                try:
-                    return float(num_limpo)
-                except ValueError:
-                    return 0.0
-
-            # ---> Função: extrair_quantidade
-            def extrair_quantidade(texto):
-                if not texto:
-                    return 1
-                match = re.search(r"per\s*(\d+)", texto, re.I)
-                if match:
-                    return int(match.group(1))
-                partes = texto.split()
-                for i, parte in enumerate(partes):
-                    if re.search(r"\d+[,.]\d{2}$", parte):
-                        if (i + 1) < len(partes) and partes[i + 1].isdigit():
-                            return int(partes[i + 1])
-                match = re.search(r"(\d+)\s*BRL", texto, re.I)
-                if match:
-                    return int(match.group(1))
-                return 1
-
-            dados = {"Arquivo": nome_arquivo, "Cidade": cidade}
-
-            match_pedido = re.search(
-                r"Purchase Order No\.\s*\n\s*[SE]\s*(\d+\s*\d+)",
-                texto_completo,
-                re.DOTALL,
-            )
-            if not match_pedido:
-                match_pedido = re.search(r"[SE]\s*(\d{2}\s*\d{6})", texto_completo)
-            dados["Codigo pedido"] = (
-                re.sub(r"\s", "", match_pedido.group(1))
-                if match_pedido
-                else "Não Encontrado"
-            )
-            dados["Codigo peça"] = (
-                nome_arquivo.split("_")[0] if nome_arquivo else "Não Encontrado"
+            # ---> Pedido cancelamento
+            linha_cancelamento = next(
+                (l for l in conteudo_linhas if "CANCELLATION" in l.upper()), None
             )
 
-            dados_foram_extraidos = False
-
-            if alteracao_pedido:
-                ancora_datas = next(
-                    (l for l in conteudo_linhas if "END-DATE" in l), None
-                )
-                if ancora_datas:
-                    datas_encontradas = re.findall(
-                        r"\d{2}\.\d{2}\.\d{2,4}", ancora_datas
-                    )
-                    dados["Data da Alteração"] = (
-                        datas_encontradas[0].replace(".", "/")
-                        if len(datas_encontradas) > 0
-                        else "Não Encontrado"
-                    )
-                    dados["Data validade antiga"] = (
-                        datas_encontradas[1].replace(".", "/")
-                        if len(datas_encontradas) > 1
-                        else "Não Encontrado"
-                    )
-                    dados["Data validade nova"] = (
-                        datas_encontradas[2].replace(".", "/")
-                        if len(datas_encontradas) > 2
-                        else "Não Encontrado"
-                    )
-
-                linha_antigo, linha_novo = None, None
-
-                idx_antigo = -1
-                for i, linha in enumerate(conteudo_linhas):
-                    if "OLD" in linha and ("BRL" in linha or "****" in linha):
-                        linha_antigo = linha
-                        idx_antigo = i
-                        break
-                if idx_antigo != -1:
-                    for i in range(
-                        idx_antigo + 1, min(idx_antigo + 5, len(conteudo_linhas))
-                    ):
-                        if "NEW" in conteudo_linhas[i] and (
-                            "BRL" in conteudo_linhas[i] or "****" in conteudo_linhas[i]
-                        ):
-                            linha_novo = conteudo_linhas[i]
-                            break
-
-                if not linha_antigo:
-                    linha_antigo = next(
+            if linha_cancelamento == None:
+                if codigo_pedido_completo != "Não Encontrado" and (
+                    codigo_pedido_completo.startswith("P")
+                    or codigo_pedido_completo.startswith("F")
+                ):
+                    dados["Tipo de Alteração"] = "FECHADO"
+                    linha_pecas = next(
                         (
                             l
                             for l in conteudo_linhas
-                            if "OLD" in l and re.search(r"\d+[,.]\d{2}", l)
+                            if "PCS" in l
+                            and ("****" in l or re.search(r"\d+[,.]\d{2}", l))
                         ),
                         None,
                     )
-                if not linha_novo:
-                    linha_novo = next(
-                        (
-                            l
-                            for l in conteudo_linhas
-                            if "NEW" in l and re.search(r"\d+[,.]\d{2}", l)
-                        ),
-                        None,
-                    )
-
-                # ---> Custo Logístico
-                if "LOGISTIC COSTS" in texto_completo:
-                    dados["Tipo de Alteração"] = "CUSTO LOGISTICO"
-                    linha_total = next(
-                        (l for l in conteudo_linhas if "TOTAL" in l), None
-                    )
-                    linha_transporte = next(
-                        (l for l in conteudo_linhas if "Transport" in l), None
-                    )
-                    linha_embalagem = next(
-                        (l for l in conteudo_linhas if "Packaging" in l), None
-                    )
-                    valor_transporte = extrair_preco(linha_transporte)
-                    valor_embalagem = extrair_preco(linha_embalagem)
-                    valor_logistico_total = valor_transporte + valor_embalagem
-                    dados["Valor transporte"] = valor_transporte
-                    dados["Valor embalagem"] = valor_embalagem
-                    dados["Valor final"] = extrair_preco(linha_total)
-                    if is_price_update and linha_antigo and linha_novo:
-                        dados["Valor antigo"] = extrair_preco(linha_antigo)
-                        dados["Valor novo"] = extrair_preco(linha_novo)
-                    else:
-                        valor_base_peca = (
-                            dados.get("Valor final", 0.0) - valor_logistico_total
-                        )
-                        dados["Valor antigo"] = valor_base_peca
-                        dados["Valor novo"] = valor_base_peca
-                    dados["Valor código"] = (
-                        dados.get("Valor novo", 0.0) + valor_logistico_total
-                    )
-                    dados["Documento X Codigo é Válido"] = (
-                        "Correto"
-                        if round(dados["Valor código"], 2)
-                        == round(dados.get("Valor final", 0.0), 2)
-                        else "Diferente"
-                    )
-                    dados["Preço por peça"] = extrair_quantidade(
-                        linha_total or linha_antigo
-                    )
+                    if linha_pecas:
+                        valor_nova_peca = self.extrair_preco(linha_pecas)
+                        quantidade_por_preco = self.extrair_quantidade(linha_pecas)
+                        quantidade = self.extrair_quantidade_principal(linha_pecas)
+                        dados["Quantidade"] = quantidade
+                        dados["Preço Peça"] = valor_nova_peca
+                        dados["Preço por Peça"] = quantidade_por_preco
                     dados_foram_extraidos = True
 
-                # ---> Prazo de Pagamento
-                elif "TERMS OF PAYMENT" in texto_completo:
-                    dados["Tipo de Alteração"] = "PRAZO PAGAMENTO"
-                    linha_prazo_antigo = next(
-                        (
-                            l
-                            for l in conteudo_linhas
-                            if "OLD" in l and "DAYS" in l.upper()
-                        ),
-                        None,
-                    )
-                    linha_prazo_novo = next(
-                        (
-                            l
-                            for l in conteudo_linhas
-                            if "NEW" in l and "DAYS" in l.upper()
-                        ),
-                        None,
-                    )
-                    prazo_antigo_match = (
-                        re.search(r"(\d+)\s*DAYS", linha_prazo_antigo, re.IGNORECASE)
-                        if linha_prazo_antigo
-                        else None
-                    )
-                    prazo_novo_match = (
-                        re.search(r"(\d+)\s*DAYS", linha_prazo_novo, re.IGNORECASE)
-                        if linha_prazo_novo
-                        else None
-                    )
-                    dados["Prazo antigo"] = (
-                        prazo_antigo_match.group(1).strip()
-                        if prazo_antigo_match
-                        else "Não Encontrado"
-                    )
-                    dados["Prazo novo"] = (
-                        prazo_novo_match.group(1).strip()
-                        if prazo_novo_match
-                        else "Não Encontrado"
-                    )
-                    dados["Preço Antigo"] = extrair_preco(linha_antigo)
-                    dados["Preço Novo"] = extrair_preco(linha_novo)
-                    dados["Preço por peça"] = extrair_quantidade(linha_antigo)
-
-                    dados_foram_extraidos = True
-
-                # ---> Alteração de Preço
-                elif is_price_update:
-                    dados["Tipo de Alteração"] = "ALTERAÇÃO DE PREÇO"
-                    dados["Preço Antigo"] = extrair_preco(linha_antigo)
-                    dados["Preço Novo"] = extrair_preco(linha_novo)
-                    dados["Preço por peça"] = extrair_quantidade(linha_antigo)
-                    dados_foram_extraidos = True
-
-                # ---> Apenas alteração validade
-                elif ancora_datas:
-                    dados["Tipo de Alteração"] = "ALTERAÇÃO VALIDADE"
-                    dados_foram_extraidos = True
-
-            # ---> Pedido novo
-            else:
-                dados["Tipo de Alteração"] = "PEDIDO NOVO"
-                linha_pecas = next(
-                    (
-                        l
-                        for l in conteudo_linhas
-                        if "OPEN" in l and ("BRL" in l or re.search(r"\d+[,.]\d{2}", l))
-                    ),
-                    None,
-                )
-                if linha_pecas:
-                    valor_nova_peca = extrair_preco(linha_pecas)
-                    quantidade_por_preco = extrair_quantidade(linha_pecas)
-                    dados["Preço Peça"] = valor_nova_peca
-                    dados["Preço por Peça"] = quantidade_por_preco
-                    dados_foram_extraidos = True
                 else:
-                    dados_foram_extraidos = False
+                    if alteracao_pedido:
+                        ancora_datas = next(
+                            (l for l in conteudo_linhas if "END-DATE" in l), None
+                        )
+                        if ancora_datas:
+                            datas_encontradas = re.findall(
+                                r"\d{2}\.\d{2}\.\d{2,4}", ancora_datas
+                            )
+                            dados["Data da Alteração"] = (
+                                datas_encontradas[0].replace(".", "/")
+                                if len(datas_encontradas) > 0
+                                else "Não Encontrado"
+                            )
+                            dados["Data validade antiga"] = (
+                                datas_encontradas[1].replace(".", "/")
+                                if len(datas_encontradas) > 1
+                                else "Não Encontrado"
+                            )
+                            dados["Data validade nova"] = (
+                                datas_encontradas[2].replace(".", "/")
+                                if len(datas_encontradas) > 2
+                                else "Não Encontrado"
+                            )
+
+                        linha_antigo, linha_novo = None, None
+
+                        idx_antigo = -1
+                        for i, linha in enumerate(conteudo_linhas):
+                            if "OLD" in linha and ("BRL" in linha or "****" in linha):
+                                linha_antigo = linha
+                                idx_antigo = i
+                                break
+                        if idx_antigo != -1:
+                            for i in range(
+                                idx_antigo + 1,
+                                min(idx_antigo + 5, len(conteudo_linhas)),
+                            ):
+                                if "NEW" in conteudo_linhas[i] and (
+                                    "BRL" in conteudo_linhas[i]
+                                    or "****" in conteudo_linhas[i]
+                                ):
+                                    linha_novo = conteudo_linhas[i]
+                                    break
+
+                        if not linha_antigo:
+                            linha_antigo = next(
+                                (
+                                    l
+                                    for l in conteudo_linhas
+                                    if "OLD" in l
+                                    and re.search(r"\d{1,3}(?:\.\d{3})*,\d{2}", l)
+                                ),
+                                None,
+                            )
+                        if not linha_novo:
+                            linha_novo = next(
+                                (
+                                    l
+                                    for l in conteudo_linhas
+                                    if "NEW" in l
+                                    and re.search(r"\d{1,3}(?:\.\d{3})*,\d{2}", l)
+                                ),
+                                None,
+                            )
+
+                        # ---> Custo Logístico
+                        if "LOGISTIC COSTS" in texto_completo:
+                            dados["Tipo de Alteração"] = "CUSTO LOGISTICO"
+                            linha_total = next(
+                                (l for l in conteudo_linhas if "TOTAL" in l), None
+                            )
+                            linha_transporte = next(
+                                (l for l in conteudo_linhas if "Transport" in l), None
+                            )
+                            linha_embalagem = next(
+                                (l for l in conteudo_linhas if "Packaging" in l), None
+                            )
+                            valor_transporte = self.extrair_preco(linha_transporte)
+                            valor_embalagem = self.extrair_preco(linha_embalagem)
+                            valor_logistico_total = valor_transporte + valor_embalagem
+                            dados["Valor transporte"] = valor_transporte
+                            dados["Valor embalagem"] = valor_embalagem
+                            dados["Valor final"] = self.extrair_preco(linha_total)
+                            if is_price_update and linha_antigo and linha_novo:
+                                dados["Valor antigo"] = self.extrair_preco(linha_antigo)
+                                dados["Valor novo"] = self.extrair_preco(linha_novo)
+                            else:
+                                valor_base_peca = (
+                                    dados.get("Valor final", 0.0)
+                                    - valor_logistico_total
+                                )
+                                dados["Valor antigo"] = valor_base_peca
+                                dados["Valor novo"] = valor_base_peca
+                            dados["Valor código"] = (
+                                dados.get("Valor novo", 0.0) + valor_logistico_total
+                            )
+                            dados["Documento X Codigo é Válido"] = (
+                                "Correto"
+                                if round(dados["Valor código"], 2)
+                                == round(dados.get("Valor final", 0.0), 2)
+                                else "Diferente"
+                            )
+                            dados["Preço por peça"] = self.extrair_quantidade(
+                                linha_total or linha_antigo
+                            )
+                            dados_foram_extraidos = True
+
+                        # ---> Prazo de Pagamento
+                        elif "TERMS OF PAYMENT" in texto_completo:
+                            dados["Tipo de Alteração"] = "PRAZO PAGAMENTO"
+                            linha_prazo_antigo = next(
+                                (
+                                    l
+                                    for l in conteudo_linhas
+                                    if "OLD" in l and "DAYS" in l.upper()
+                                ),
+                                None,
+                            )
+                            linha_prazo_novo = next(
+                                (
+                                    l
+                                    for l in conteudo_linhas
+                                    if "NEW" in l and "DAYS" in l.upper()
+                                ),
+                                None,
+                            )
+                            prazo_antigo_match = (
+                                re.search(
+                                    r"(\d+)\s*DAYS", linha_prazo_antigo, re.IGNORECASE
+                                )
+                                if linha_prazo_antigo
+                                else None
+                            )
+                            prazo_novo_match = (
+                                re.search(
+                                    r"(\d+)\s*DAYS", linha_prazo_novo, re.IGNORECASE
+                                )
+                                if linha_prazo_novo
+                                else None
+                            )
+                            dados["Prazo antigo"] = (
+                                prazo_antigo_match.group(1).strip()
+                                if prazo_antigo_match
+                                else "Não Encontrado"
+                            )
+                            dados["Prazo novo"] = (
+                                prazo_novo_match.group(1).strip()
+                                if prazo_novo_match
+                                else "Não Encontrado"
+                            )
+                            dados["Preço Antigo"] = self.extrair_preco(linha_antigo)
+                            dados["Preço Novo"] = self.extrair_preco(linha_novo)
+                            dados["Preço por peça"] = self.extrair_quantidade(
+                                linha_antigo
+                            )
+
+                            dados_foram_extraidos = True
+
+                        # ---> Alteração de Preço
+                        elif is_price_update:
+                            dados["Tipo de Alteração"] = "ALTERAÇÃO DE PREÇO"
+                            dados["Preço Antigo"] = self.extrair_preco(linha_antigo)
+                            dados["Preço Novo"] = self.extrair_preco(linha_novo)
+                            dados["Preço por peça"] = self.extrair_quantidade(
+                                linha_antigo
+                            )
+                            dados_foram_extraidos = True
+
+                        # ---> Apenas alteração validade
+                        elif ancora_datas:
+                            dados["Tipo de Alteração"] = "ALTERAÇÃO VALIDADE"
+
+                            dados_foram_extraidos = True
+
+                    # ---> Pedido novo
+                    else:
+                        dados["Tipo de Alteração"] = "PEDIDO NOVO"
+                        linha_pecas = next(
+                            (
+                                l
+                                for l in conteudo_linhas
+                                if "OPEN" in l
+                                and ("BRL" in l or re.search(r"\d+[,.]\d{2}", l))
+                            ),
+                            None,
+                        )
+                        if linha_pecas:
+                            valor_nova_peca = self.extrair_preco(linha_pecas)
+                            quantidade_por_preco = self.extrair_quantidade(linha_pecas)
+                            dados["Preço Peça"] = valor_nova_peca
+                            dados["Preço por Peça"] = quantidade_por_preco
+                            dados_foram_extraidos = True
+                        else:
+                            dados_foram_extraidos = False
+            else:
+                dados["Tipo de Alteração"] = "CANCELAMENTO"
+                dados_foram_extraidos = True
 
             if dados_foram_extraidos:
                 self.dados_extraidos.append(dados)
@@ -407,12 +507,12 @@ class tratamentoDados:
         except Exception as e:
             print(f"Erro de processamento no arquivo {nome_arquivo}. Erro: {e}")
             self.pedidos_falha.add(nome_arquivo)
-            # ATENÇÃO: Lógica de fallback com nomes de cidades
+            # SENSÍVEL: Lógica de fallback também foi generalizada.
             linha_cidade_fallback = next(
-                (l for l in conteudo_linhas if "CidadeA" in l or "CidadeB" in l), ""
+                (l for l in conteudo_linhas if "Cidade A" in l or "Cidade B" in l), ""
             )
             cidade_extraida = (
-                "CidadeA" if "CidadeA" in linha_cidade_fallback else "CidadeB"
+                "Cidade A" if "Cidade A" in linha_cidade_fallback else "Cidade B"
             )
             self._mover_arquivo_processado(nome_arquivo, cidade_extraida, sucesso=False)
             traceback.print_exc()
@@ -489,6 +589,23 @@ class tratamentoDados:
                     "Data validade antiga",
                     "Data validade nova",
                 ],
+                "CANCELAMENTO": [
+                    "Arquivo",
+                    "Codigo pedido",
+                    "Codigo peça",
+                    "Cidade",
+                    "Tipo de Alteração",
+                ],
+                "FECHADO": [
+                    "Arquivo",
+                    "Codigo pedido",
+                    "Codigo peça",
+                    "Cidade",
+                    "Tipo de Alteração",
+                    "Quantidade",
+                    "Preço Peça",
+                    "Preço por Peça",
+                ],
             }
             df = pd.DataFrame(self.dados_extraidos)
             with pd.ExcelWriter(self.caminho_saida_excel, engine="openpyxl") as writer:
@@ -498,6 +615,8 @@ class tratamentoDados:
                     "CUSTO LOGISTICO",
                     "PRAZO PAGAMENTO",
                     "ALTERAÇÃO VALIDADE",
+                    "CANCELAMENTO",
+                    "FECHADO",
                 ]
                 categorias_presentes = [
                     cat for cat in ordem_abas if cat in df["Tipo de Alteração"].unique()
@@ -529,50 +648,73 @@ class tratamentoDados:
 
     # ---> 6. Envia e-mail com o resultado
     def enviar_email(self):
-        if not self.pedidos_sucesso and not self.pedidos_falha:
+        if (
+            not self.pedidos_sucesso
+            and not self.pedidos_falha
+            and not self.pedidos_existentes
+        ):
             print("Nenhum processamento realizado, e-mail não enviado.")
             return
+
         try:
             outlook = Dispatch("outlook.application")
             mail = outlook.CreateItem(0)
             mail.To = self.user_mail
-            mail.cc = self.cc_mail
+            mail.CC = self.cc_mail
+
             subject_parts = []
             if self.pedidos_sucesso:
                 subject_parts.append("SUCESSO")
+            if self.pedidos_falha or self.pedidos_existentes:
+                subject_parts.append("AVISO")
             if self.pedidos_falha:
                 subject_parts.append("FALHA")
+
             mail.Subject = f"Ajuste de Preços - {'/'.join(subject_parts)} - {datetime.now().strftime('%d/%m/%Y')}"
+
             qtde_sucesso = len(self.pedidos_sucesso)
             qtde_falha = len(self.pedidos_falha)
-            total_pedidos = qtde_falha + qtde_sucesso
+            qtde_existentes = len(self.pedidos_existentes)
+
+            total_pedidos = qtde_falha + qtde_sucesso + qtde_existentes
+
+            s_total = "s" if total_pedidos > 1 else ""
             texto_total = (
-                f"<b>{total_pedidos} pedido processado.</b>"
-                if total_pedidos == 1
-                else f"<b>{total_pedidos} pedidos processados.</b>"
+                f"<b>{total_pedidos} arquivo{s_total} verificado{s_total}.</b>"
             )
-            html_body = f"<p>Olá,</p><p>A rotina de ajuste de preços foi finalizada.</p><p>{texto_total}</p>"
+
+            html_body = [
+                "<p>Olá,</p>",
+                "<p>A rotina de ajuste de preços foi finalizada.</p>",
+                f"<p>{texto_total}</p>",
+            ]
+
             if self.pedidos_sucesso:
-                texto_sucesso = (
-                    f"{qtde_sucesso} arquivo processado com sucesso."
-                    if qtde_sucesso == 1
-                    else f"{qtde_sucesso} arquivos processados com sucesso."
-                )
-                html_body += f"<p><b>{texto_sucesso}</b></p>"
+                s_sucesso = "s" if qtde_sucesso > 1 else ""
+                texto_sucesso = f"{qtde_sucesso} arquivo{s_sucesso} processado{s_sucesso} com sucesso."
+                html_body.append(f'<p><b style="color:green;">{texto_sucesso}</b></p>')
                 if os.path.exists(self.caminho_saida_excel):
                     mail.Attachments.Add(os.path.abspath(self.caminho_saida_excel))
+
+            if self.pedidos_existentes:
+                s_exist = "s" if qtde_existentes > 1 else ""
+                verbo_exist = "m" if qtde_existentes > 1 else ""
+                texto_exist = f"{qtde_existentes} arquivo{s_exist} não foi/foram movido{s_exist} pois já existe{verbo_exist} no destino."
+                html_body.append(f'<p><b style="color:yellow;">{texto_exist}</b></p>')
+
             if self.pedidos_falha:
-                texto_falha = (
-                    f"{qtde_falha} arquivo falhou."
-                    if qtde_falha == 1
-                    else f"{qtde_falha} arquivos falharam."
-                )
-                html_body += f"<p><b>{texto_falha}</b></p>"
-            # MODIFICADO: Assinatura de e-mail genérica
-            html_body += "<p>Att,<br>Bot de Automação</p>"
-            mail.HTMLBody = html_body
+                s_falha = "s" if qtde_falha > 1 else ""
+                verbo_falha = "ram" if qtde_falha > 1 else "u"
+                texto_falha = f"{qtde_falha} arquivo{s_falha} falha{verbo_falha} no processamento."
+                html_body.append(f'<p><b style="color:red;">{texto_falha}</b></p>')
+            
+            # SENSÍVEL: Assinatura do bot generalizada.
+            html_body.append("<p>Att,<br>Bot de Automação</p>")
+
+            mail.HTMLBody = "".join(html_body)
             mail.Send()
             print("Email de status enviado com sucesso!")
+
         except Exception as e:
             print(f"Ocorreu um erro ao tentar enviar o e-mail: {e}")
             messagebox.showerror(
@@ -588,7 +730,8 @@ class App(ctk.CTk):
         self.tratamento = tratamentoDados()
         self.automacao_thread = None
         self.evento_parar = threading.Event()
-        self.title("AJUSTADOR DE PEDIDOS")
+        # SENSÍVEL: Título da janela generalizado.
+        self.title("LEITOR DE PDF")
         self.minsize(700, 600)
         ctk.set_appearance_mode("dark")
         self.grid_columnconfigure(0, weight=1)
@@ -613,17 +756,26 @@ class App(ctk.CTk):
         ctk.CTkLabel(inputs_frame, text="Login:", font=status_font).grid(
             row=0, column=0, padx=10, pady=(10, 5), sticky="w"
         )
-        self.entry_login = ctk.CTkEntry(inputs_frame, font=status_font)
+        self.entry_login = ctk.CTkEntry(
+            inputs_frame,
+            font=status_font,
+            # SENSÍVEL: Texto do placeholder generalizado.
+            placeholder_text="Informe o login do portal de pedidos",
+        )
         self.entry_login.grid(row=0, column=1, padx=10, pady=(10, 5), sticky="ew")
-        self.entry_login.insert(0, "")
 
         # ---> Campo de entrada para senha
         ctk.CTkLabel(inputs_frame, text="Senha:", font=status_font).grid(
             row=1, column=0, padx=10, pady=(10, 5), sticky="w"
         )
-        self.entry_senha = ctk.CTkEntry(inputs_frame, show="*", font=status_font)
+        self.entry_senha = ctk.CTkEntry(
+            inputs_frame,
+            show="*",
+            font=status_font,
+            # SENSÍVEL: Texto do placeholder generalizado.
+            placeholder_text="Informe a senha do portal de pedidos",
+        )
         self.entry_senha.grid(row=1, column=1, padx=10, pady=(10, 5), sticky="ew")
-        self.entry_senha.insert(0, "")
 
         # ---> Mostrar senha
         self.check_mostrar_pwd = ctk.CTkCheckBox(
@@ -638,25 +790,48 @@ class App(ctk.CTk):
         ctk.CTkLabel(inputs_frame, text="Código TOTP", font=status_font).grid(
             row=2, column=0, padx=10, pady=(10, 5), sticky="w"
         )
-        self.entry_codigo = ctk.CTkEntry(inputs_frame, font=status_font)
+        self.entry_codigo = ctk.CTkEntry(
+            inputs_frame,
+            font=status_font,
+            # SENSÍVEL: Texto do placeholder generalizado.
+            placeholder_text="Informe o código TOTP para autenticação MFA",
+        )
         self.entry_codigo.grid(row=2, column=1, padx=10, pady=(10, 5), sticky="ew")
-        self.entry_codigo.insert(0, "")
 
-        # MODIFICADO: Rótulo do campo de e-mail genérico
-        ctk.CTkLabel(inputs_frame, text="E-mail (em cópia):", font=status_font).grid(
+        # ---> Campo de entrada para pesquisa pedido específico
+        ctk.CTkLabel(inputs_frame, text="Part Number(s)", font=status_font).grid(
             row=3, column=0, padx=10, pady=(10, 5), sticky="w"
         )
-        self.entry_email = ctk.CTkEntry(inputs_frame, font=status_font)
-        self.entry_email.grid(row=3, column=1, padx=10, pady=(10, 5), sticky="ew")
-        self.entry_email.insert(0, "")
+        self.entry_pedido = ctk.CTkEntry(
+            inputs_frame,
+            font=status_font,
+            placeholder_text="Informe os Part Numbers separados por  ' , '  ou  ' ; '",
+        )
+        self.entry_pedido.grid(row=3, column=1, padx=10, pady=(10, 5), sticky="ew")
+
+        # ---> Campo de entrada para e-mail
+        # SENSÍVEL: Label do campo de e-mail generalizado.
+        ctk.CTkLabel(inputs_frame, text="E-mail (Cópia):", font=status_font).grid(
+            row=4, column=0, padx=10, pady=(10, 5), sticky="w"
+        )
+        self.entry_email = ctk.CTkEntry(
+            inputs_frame,
+            font=status_font,
+            # SENSÍVEL: Texto do placeholder generalizado.
+            placeholder_text="Informe o e-mail para receber a notificação em cópia",
+        )
+        self.entry_email.grid(row=4, column=1, padx=10, pady=(10, 5), sticky="ew")
 
         # ---> Campo de entrada para pasta de PDFs
         ctk.CTkLabel(inputs_frame, text="Pasta dos PDFs:", font=status_font).grid(
-            row=4, column=0, padx=10, pady=(5, 10), sticky="w"
+            row=5, column=0, padx=10, pady=(5, 10), sticky="w"
         )
-        self.entry_pdf_path = ctk.CTkEntry(inputs_frame, font=status_font)
-        self.entry_pdf_path.grid(row=4, column=1, padx=10, pady=(5, 10), sticky="ew")
-        self.entry_pdf_path.insert(0, r"")
+        self.entry_pdf_path = ctk.CTkEntry(
+            inputs_frame,
+            font=status_font,
+            placeholder_text="Informe a pasta para salvar e processar os PDFs",
+        )
+        self.entry_pdf_path.grid(row=5, column=1, padx=10, pady=(5, 10), sticky="ew")
 
         # ---> Botão para selecionar pasta
         ctk.CTkButton(
@@ -664,7 +839,7 @@ class App(ctk.CTk):
             text="Selecionar Pasta",
             font=status_font,
             command=self.selecionar_pasta,
-        ).grid(row=4, column=2, padx=10, pady=(5, 10))
+        ).grid(row=5, column=2, padx=10, pady=(5, 10))
 
         # --- Frame para os botões ---
         action_frame = ctk.CTkFrame(main_frame)
@@ -705,7 +880,7 @@ class App(ctk.CTk):
             command=self.parar_automacao,
             state="disabled",
         )
-        self.btn_parar.grid(row=0, column=2, padx=20, pady=20, sticky="w")
+        self.btn_parar.grid(row=0, column=2, padx=20, pady=20, sticky="ew")
         self.return_user = ctk.CTkLabel(
             main_frame, text="Pronto para iniciar.", font=status_font
         )
@@ -736,7 +911,7 @@ class App(ctk.CTk):
         self.tratamento.cc_mail = self.entry_email.get()
         self.tratamento.caminho_pasta_pdf = self.entry_pdf_path.get()
         self.tratamento.caminho_saida_excel = os.path.join(
-            self.tratamento.caminho_pasta_pdf, "Ajuste Pedidos.xlsx"
+            self.tratamento.caminho_pasta_pdf, "Ajuste_Pedidos.xlsx"
         )
         return True
 
@@ -747,15 +922,26 @@ class App(ctk.CTk):
 
         self._configurar_botoes_para_rodar(True)
 
+        pedido_texto = self.entry_pedido.get().strip()
+        if pedido_texto:
+            lista_pedidos = [
+                p.strip() for p in re.split(r"[,;]", pedido_texto) if p.strip()
+            ]
+        else:
+            lista_pedidos = []
+
         automator = AutomacaoPedidos(
             tratamento_dados=self.tratamento,
             evento_parar=self.evento_parar,
             login=self.entry_login.get(),
             senha=self.entry_senha.get(),
             autenticador=self.entry_codigo.get(),
+            pedido_especifico=lista_pedidos,
         )
         self.automation_thread = threading.Thread(
-            target=self.executar_e_atualizar_ui, args=(automator.executar,), daemon=True
+            target=self.executar_e_atualizar_ui,
+            args=(automator.executar, "Download e Renomeação de PDFs"),
+            daemon=True,
         )
         self.automation_thread.start()
 
@@ -763,27 +949,93 @@ class App(ctk.CTk):
     def iniciar_processamento(self):
         if not self._validar_campos(verificar_login=False):
             return
-
         self._configurar_botoes_para_rodar(True)
+
         self.automation_thread = threading.Thread(
             target=self.executar_e_atualizar_ui,
-            args=(self.tratamento.processar_arquivos_baixados,),
+            args=(
+                self.tratamento.processar_arquivos_baixados,
+                "Processamento de PDFs",
+                self.evento_parar,
+            ),
             daemon=True,
         )
         self.automation_thread.start()
 
-    # ---> Função que executa a automação em uma thread separada
-    def executar_e_atualizar_ui(self, funcao_alvo):
-        self.atualizar_status("Iniciando processo...", "cyan")
+    # ---> Função que CRIA O LOG da automação
+    def _criar_log(self, rotina, quantidade_itens, base_name):
         try:
-            # A função alvo (seja download ou processamento) é executada aqui
-            sucesso, mensagem = funcao_alvo()
+            tempo_download_humano_por_item = 90
+            tempo_preenchimento_humano_por_item = 90
+
+            if rotina == "Processamento de PDFs - Pedidos":
+                total_tempo_humano_por_item = tempo_preenchimento_humano_por_item
+            else:
+                total_tempo_humano_por_item = (
+                    tempo_download_humano_por_item + tempo_preenchimento_humano_por_item
+                )
+
+            tempo_bot_fixo_segundos = 45
+            df_log = pd.DataFrame(
+                {
+                    "Usuario": [self.tratamento.user],
+                    "Rotina": [rotina],
+                    "Data/Hora": [strftime("%Y-%m-%d %H:%M:%S")],
+                    "Quantidade de itens": [quantidade_itens],
+                    "Tempo_humano(segundos)": [
+                        quantidade_itens * total_tempo_humano_por_item
+                    ],
+                    "Tempo_bot(segundos)": [tempo_bot_fixo_segundos],
+                }
+            )
+            caminho_do_log = cria_proximo_arquivo(
+                folder_path=self.tratamento.caminho_log, base_name=base_name
+            )
+
+            if not caminho_do_log:
+                print("Erro: Não foi possível gerar um nome de arquivo de log.")
+                return
+
+            df_log.to_csv(caminho_do_log, index=False, sep=";", encoding="utf-8-sig")
+            print(f"Log salvo com sucesso em: {caminho_do_log}")
+
+        except Exception as e:
+            print(f"Erro ao salvar log: {e}")
+            traceback.print_exc()
+
+    # ---> Função que executa a automação em uma thread separada
+    def executar_e_atualizar_ui(self, funcao_alvo, rotina, *args_para_funcao):
+        self.atualizar_status("Iniciando processo...", "cyan")
+        resultado = {}
+        contagem_final = 0
+
+        start_time = datetime.now()
+
+        try:
+            sucesso, mensagem, contagem_final = funcao_alvo(*args_para_funcao)
             resultado = {"sucesso": sucesso, "mensagem": mensagem}
+
         except Exception as e:
             traceback.print_exc()
             resultado = {"sucesso": False, "mensagem": f"Erro crítico na thread: {e}"}
 
-        self.after(0, self.finalizar_automacao, resultado)
+        finally:
+            end_time = datetime.now()
+            tempo_total = (end_time - start_time).total_seconds()
+            print(f"INFO: Tempo real de execução foi de {tempo_total:.2f} segundos.")
+
+            if contagem_final > 0:
+                log_base_name = "data"
+                self._criar_log(rotina, contagem_final, log_base_name)
+                print(
+                    f"Log de execução criado para {contagem_final} item(ns) verificado(s)."
+                )
+            else:
+                print(
+                    f"Log não foi criado pois nenhum item foi processado (Itens: {contagem_final})."
+                )
+
+            self.after(0, self.finalizar_automacao, resultado)
 
     # ---> Função para finalizar a automação e atualizar a UI
     def finalizar_automacao(self, resultado):
