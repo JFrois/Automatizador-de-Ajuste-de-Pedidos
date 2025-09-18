@@ -1,7 +1,8 @@
+import datetime
 import time
 from tkinter import messagebox
 import traceback
-from selenium import webdriver
+from seleniumwire import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
@@ -10,38 +11,45 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     TimeoutException,
     WebDriverException,
-    StaleElementReferenceException,
+    NoSuchElementException,
 )
 import pythoncom
 import os
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.support.ui import Select
+from selenium.webdriver.common.keys import Keys
+import re
+from win32com.client import (
+    Dispatch,
+)
 
 
 class AutomacaoPedidos:
-    def __init__(self, tratamento_dados, evento_parar, login, senha, autenticador):
+    def __init__(
+        self,
+        tratamento_dados,
+        evento_parar,
+        login,
+        senha,
+        autenticador,
+        pedido_especifico,
+    ):
+        self.user = os.getlogin()
         self.tratamento = tratamento_dados
         self.evento_parar = evento_parar
         self.login = login
         self.senha = senha
+        # SENSÍVEL: Domínio de e-mail genérico.
+        self.user_mail = f"{self.user}@sua_empresa.com"
+        self.cc_mail = ""
         self.autenticador = autenticador
+        self.pedidos_especificos = pedido_especifico
         self.driver = None
-        self.actions = None
-        self.wait = None
-        self.short_wait = None
+        self.pedidos_sucesso = set()
+        self.pedidos_falha = set()
 
-    def _verificar_parada(self):
-        if self.evento_parar.is_set():
-            raise InterruptedError("Automação interrompida pelo usuário.")
-
-    def _iniciar_driver(self):
-        print("Iniciando o navegador...")
+        print("Iniciando o navegador com captura de rede...")
         chrome_options = Options()
-        pasta_download = self.tratamento.caminho_pasta_pdf
-        prefs = {
-            "download.default_directory": pasta_download,
-            "safebrowsing.enabled": True,
-        }
-        chrome_options.add_experimental_option("prefs", prefs)
         arguments = [
             "--lang=pt-BR",
             "--start-maximized",
@@ -51,81 +59,55 @@ class AutomacaoPedidos:
             "--disable-dev-shm-usage",
             "--disable-extensions",
             "--log-level=3",
+            "--ignore-certificate-errors",
         ]
         for argument in arguments:
             chrome_options.add_argument(argument)
         service = ChromeService()
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
-        self.short_wait = WebDriverWait(self.driver, 10)
+        self.short_wait = WebDriverWait(self.driver, 5)
         self.wait = WebDriverWait(self.driver, 20)
-        self.actions = ActionChains(self.driver)
 
-    # ===> Função: Realiza a busca do primeiro elemento que corresponde ao caminho usando querySelector, retorna um único WebElement ou None
-    def _find_first_element(self, path_selectors):
-        script = """
-            let element = document;
-            const selectors = arguments[0];
-            for (let i = 0; i < selectors.length; i++) {
-                if (element.shadowRoot) { element = element.shadowRoot; }
-                element = element.querySelector(selectors[i]);
-                if (!element) { return null; }
-            }
-            return element;
-        """
-        return self.wait.until(
-            lambda driver: driver.execute_script(script, path_selectors),
-            f"Timeout ao tentar encontrar o elemento no caminho Shadow DOM: {path_selectors}",
-        )
+    def _verificar_parada(self):
+        if self.evento_parar.is_set():
+            raise InterruptedError("Automação interrompida pelo usuário.")
 
     def _fazer_login(self):
         print("\n---> Acessando a página de login.")
-        # ATENÇÃO: Substitua pela URL correta do portal do cliente.
-        self.driver.get("https://portal.cliente.exemplo.com/login")
+        # SENSÍVEL: URL de login substituída por uma genérica.
+        # TODO: Substitua pela URL de login correta do portal que você está automatizando.
+        login_url = "https://portal-do-seu-cliente.com/login"
+        self.driver.get(login_url)
         self._verificar_parada()
         try:
-            # --- Preenchendo o formulário de login ---
+            # NOTE: Os IDs dos campos ('contentForm:profileIdInput', 'contentForm:passwordInput', etc.)
+            # são específicos do site que você está automatizando. Você precisará inspecionar
+            # a página de login do seu portal e atualizar esses seletores.
             campo_usuario = self.wait.until(
                 EC.presence_of_element_located((By.ID, "contentForm:profileIdInput"))
             )
             campo_usuario.clear()
             campo_usuario.send_keys(self.login)
-            print("Usuário inserido.")
-
-            # --- Preenchendo o campo de senha ---
             campo_senha = self.wait.until(
                 EC.presence_of_element_located((By.ID, "contentForm:passwordInput"))
             )
             campo_senha.clear()
             campo_senha.send_keys(self.senha)
-            print("Senha inserida.")
-
-            # --- Ativando o checkbox de autenticação forte, se necessário ---
             try:
                 checkbox = self.short_wait.until(
                     EC.presence_of_element_located((By.ID, "contentForm:j_idt25_input"))
                 )
                 if not checkbox.is_selected():
                     checkbox.click()
-                    print("Checkbox 'Strong authentication' ativado.")
             except TimeoutException:
-                print("AVISO: Checkbox 'Strong authentication' não encontrado.")
-
-            # --- Clicando no botão de login ---
+                pass  # Checkbox não encontrado, ignora
             botao_login = self.wait.until(
                 EC.element_to_be_clickable((By.ID, "contentForm:passwordLoginAction"))
             )
             botao_login.click()
-            print("Botão de login clicado.")
-
-            # --- Preenchendo o campo TOTP ---
-            self._verificar_parada()
             campo_totp = self.wait.until(EC.presence_of_element_located((By.ID, "otp")))
             campo_totp.clear()
             campo_totp.send_keys(self.autenticador)
-            print("Código TOTP inserido.")
-
-            # --- Confirmando o login ---
-            self._verificar_parada()
             botao_confirmar_totp = self.wait.until(
                 EC.element_to_be_clickable((By.XPATH, "//button[text()='Login']"))
             )
@@ -138,53 +120,236 @@ class AutomacaoPedidos:
         except Exception as e:
             raise RuntimeError(f"Ocorreu um erro inesperado durante o login: {e}")
 
-    def _renomear_ultimo_arquivo_baixado(self, pasta_download, novo_prefixo):
-        time.sleep(3)
-        arquivos = sorted(
-            [os.path.join(pasta_download, f) for f in os.listdir(pasta_download)],
-            key=os.path.getmtime,
-        )
-        if not arquivos:
-            print(
-                "AVISO: Nenhum arquivo encontrado na pasta de download para renomear."
+    def _ler_todos_pedidos_do_site(self):
+        print("Lendo a lista de todos os pedidos disponíveis no site...")
+        try:
+            # NOTE: Este seletor XPath é específico do site original.
+            # Você precisará atualizá-lo para corresponder à estrutura da tabela de pedidos do seu portal.
+            self.wait.until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//table[contains(@class, 'TD01b')]")
+                )
             )
+            elementos_pedidos = self.driver.find_elements(
+                By.XPATH, "//table[contains(@class, 'TD01b')]//tr/td[4]"
+            )
+            if elementos_pedidos:
+                pedidos_string = elementos_pedidos[0].text.strip()
+                lista_de_pedidos = [
+                    p.strip() for p in re.split(r"[,;]", pedidos_string) if p.strip()
+                ]
+            else:
+                lista_de_pedidos = []
+            print(f"Encontrados {len(lista_de_pedidos)} pedidos na página.")
+            return lista_de_pedidos
+        except Exception as e:
+            print(f"Erro ao ler la lista de pedidos do site: {e}")
+            return []
+
+    def _buscar_e_processar_pedidos(
+        self, pedido_para_buscar, aba_pedidos_handle, url_busca
+    ):
+        print(
+            f"\n--- Iniciando processamento para o termo de busca: '{pedido_para_buscar}' ---"
+        )
+        try:
+            self.driver.switch_to.window(aba_pedidos_handle)
+            self.driver.get(url_busca)
+            del self.driver.requests
+
+            elemento_busca = self.wait.until(
+                EC.presence_of_element_located((By.NAME, "searchString"))
+            )
+            elemento_busca.clear()
+            elemento_busca.send_keys(pedido_para_buscar)
+            Select(self.driver.find_element(By.NAME, "filter")).select_by_visible_text(
+                "todos os processos"
+            )
+            ActionChains(self.driver).send_keys(
+                Keys.TAB, Keys.TAB, Keys.ENTER
+            ).perform()
+            print(f"Busca por '{pedido_para_buscar}' realizada.")
+            self.wait.until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//table[contains(@class, 'TD01b')]")
+                )
+            )
+        except TimeoutException:
+            print(
+                f"AVISO: A busca por '{pedido_para_buscar}' não retornou resultados."
+            )
+            self.pedidos_falha.add(pedido_para_buscar)
             return
 
-        ultimo_arquivo = arquivos[-1]
-        if ultimo_arquivo.endswith(".crdownload"):
-            print("Aguardando finalização do download...")
-            time.sleep(5)
-            arquivos = sorted(
-                [os.path.join(pasta_download, f) for f in os.listdir(pasta_download)],
-                key=os.path.getmtime,
-            )
-            ultimo_arquivo = arquivos[-1]
+        pagina_atual = 1
+        while True:
+            self._verificar_parada()
+            print(f"\nProcessando página {pagina_atual} de resultados...")
+            
+            # NOTE: O seletor XPath abaixo é específico. Adapte-o para o seu site.
+            xpath_links_resultados = "//table[contains(@class, 'TD01b')]//tr/td[3]/a"
+            try:
+                WebDriverWait(self.driver, 5).until(
+                    EC.presence_of_element_located((By.XPATH, xpath_links_resultados))
+                )
+                links_encontrados = self.driver.find_elements(
+                    By.XPATH, xpath_links_resultados
+                )
+                num_links_na_pagina = len(links_encontrados)
+                if num_links_na_pagina == 0:
+                    print("Nenhum resultado de pedido encontrado nesta página.")
+                    break
+                print(
+                    f"Encontrados {num_links_na_pagina} pedido(s) na página {pagina_atual}."
+                )
+            except TimeoutException:
+                print(
+                    f"Nenhum resultado de pedido encontrado na página {pagina_atual}."
+                )
+                break
 
-        nome_original_sem_ext, extensao = os.path.splitext(
-            os.path.basename(ultimo_arquivo)
-        )
-        partes = nome_original_sem_ext.split("_")
+            for i in range(num_links_na_pagina):
+                try:
+                    linha_resultado = self.driver.find_elements(
+                        By.XPATH, "//table[contains(@class, 'TD01b')]//tr[td[3]/a]"
+                    )[i]
+                    link_para_clicar = linha_resultado.find_element(
+                        By.XPATH, ".//td[3]/a"
+                    )
 
-        if len(partes) > 2:
-            sufixo_original = "_".join(partes[2:])
-            nome_final = f"{novo_prefixo}_{sufixo_original}"
-        else:
-            nome_final = novo_prefixo
+                    codigo_pedido_completo = link_para_clicar.text.strip().split(
+                        " de "
+                    )[0]
+                    codigo_para_arquivo = linha_resultado.find_element(
+                        By.XPATH, ".//td[4]"
+                    ).text.strip()
 
-        novo_nome_completo = f"{nome_final}{extensao}"
-        novo_caminho = os.path.join(pasta_download, novo_nome_completo)
+                    print(
+                        f"Processando item {i+1}/{num_links_na_pagina}: Pedido {codigo_pedido_completo}"
+                    )
+                    link_para_clicar.click()
+                    self._baixar_pdf_aberto(
+                        aba_pedidos_handle, codigo_pedido_completo, codigo_para_arquivo
+                    )
 
+                    print("Retornando à página de resultados...")
+                    self.driver.switch_to.window(aba_pedidos_handle)
+                    self.driver.get(url_busca)
+
+                    elemento_busca = self.wait.until(
+                        EC.presence_of_element_located((By.NAME, "searchString"))
+                    )
+                    elemento_busca.clear()
+                    elemento_busca.send_keys(pedido_para_buscar)
+                    Select(
+                        self.driver.find_element(By.NAME, "filter")
+                    ).select_by_visible_text("todos os processos")
+                    ActionChains(self.driver).send_keys(
+                        Keys.TAB, Keys.TAB, Keys.ENTER
+                    ).perform()
+                    self.wait.until(
+                        EC.presence_of_element_located(
+                            (By.XPATH, "//table[contains(@class, 'TD01b')]")
+                        )
+                    )
+
+                    if pagina_atual > 1:
+                        print(f"Navegando de volta para a página {pagina_atual}...")
+                        for _ in range(pagina_atual - 1):
+                            botao_proxima_pagina = self.wait.until(
+                                EC.element_to_be_clickable(
+                                    (
+                                        By.XPATH,
+                                        "//a[contains(@href, 'pager.offset')]//img[contains(@alt, 'próxima página')]",
+                                    )
+                                )
+                            )
+                            botao_proxima_pagina.click()
+                            self.wait.until(EC.staleness_of(botao_proxima_pagina))
+                except Exception as e:
+                    print(
+                        f"ERRO ao processar um item na lista. Pulando. Erro: {e}"
+                    )
+                    self.driver.get(url_busca)
+                    continue
+            try:
+                # NOTE: Seletor para o botão "próxima página". Adapte se necessário.
+                botao_proxima_pagina = self.driver.find_element(
+                    By.XPATH,
+                    "//a[contains(@href, 'pager.offset')]//img[contains(@alt, 'próxima página')]",
+                )
+                print("Botão 'próxima página' encontrado. Clicando...")
+                botao_proxima_pagina.click()
+                pagina_atual += 1
+                self.wait.until(EC.staleness_of(botao_proxima_pagina))
+            except NoSuchElementException:
+                print("Não há mais páginas de resultados.")
+                break
+
+    def _baixar_pdf_aberto(
+        self, aba_pedidos_handle, codigo_pedido_completo, codigo_para_arquivo
+    ):
         try:
-            print(
-                f"Renomeando '{os.path.basename(ultimo_arquivo)}' para '{novo_nome_completo}'..."
+            self._verificar_parada()
+            links_pdf = self.wait.until(
+                EC.presence_of_all_elements_located(
+                    (By.PARTIAL_LINK_TEXT, "Pedido em PDF")
+                )
             )
-            os.rename(ultimo_arquivo, novo_caminho)
-            print("Arquivo renomeado com sucesso.")
-        except Exception as e:
-            print(f"ERRO ao renomear o arquivo: {e}")
+            if not links_pdf:
+                print("AVISO: Nenhum link de PDF encontrado na página de detalhes.")
+                self.pedidos_falha.add(codigo_pedido_completo)
+                return
+
+            aba_detalhes_handle = self.driver.current_window_handle
+            links_pdf[-1].click()
+
+            self.wait.until(EC.number_of_windows_to_be(3))
+            aba_download_handle = [
+                h
+                for h in self.driver.window_handles
+                if h not in [aba_pedidos_handle, aba_detalhes_handle]
+            ][0]
+            self.driver.switch_to.window(aba_download_handle)
+
+            # SENSÍVEL: Padrão de URL de download generalizado.
+            # O original era '.*bestellung.*'. Adapte para um padrão que capture a URL do PDF no seu portal.
+            request_pdf = self.driver.wait_for_request(r".*order.*\.pdf", timeout=20)
+            if request_pdf.response and 200 <= request_pdf.response.status_code < 300:
+                pdf_content = request_pdf.response.body
+                prefixo = re.sub(r"[_/.]", " ", codigo_para_arquivo)
+                sufixo = codigo_pedido_completo.replace("_", "")
+                nome_final = f"{prefixo}_{sufixo}.pdf"
+                caminho_completo = os.path.join(
+                    self.tratamento.caminho_pasta_pdf, nome_final
+                )
+
+                with open(caminho_completo, "wb") as f:
+                    f.write(pdf_content)
+                print(f"Arquivo '{nome_final}' salvo com sucesso!")
+                self.pedidos_sucesso.add(prefixo)
+
+            self.driver.close()
+            self.driver.switch_to.window(aba_detalhes_handle)
+        except (TimeoutException, IndexError) as e:
+            print(
+                f"ERRO: Não foi possível baixar o PDF para {codigo_pedido_completo}. Erro: {e}"
+            )
+            self.pedidos_falha.add(codigo_para_arquivo)
+        finally:
+            handles = self.driver.window_handles
+            if len(handles) > 2 and self.driver.current_window_handle not in [
+                aba_pedidos_handle
+            ]:
+                self.driver.close()
+            self.driver.switch_to.window(aba_pedidos_handle)
 
     def _navegar_e_baixar_pdfs(self):
         print("\n---> Navegando para a tela de pedidos.")
+        aba_principal_handle = self.driver.current_window_handle
+        
+        # NOTE: Este seletor é altamente específico. Você precisará encontrar o
+        # seletor correto para o link ou botão que leva à área de pedidos do seu portal.
         self.wait.until(
             EC.element_to_be_clickable(
                 (
@@ -193,114 +358,120 @@ class AutomacaoPedidos:
                 )
             )
         ).click()
-        print("Acessada a seção 'Online Orders Series Material'.")
-        time.sleep(2)
 
-        # Abrindo a seção de pedidos em uma nova janela
-        janela_principal = self.driver.window_handles[0]
-        janela_pedidos = self.driver.window_handles[-1]
-        self.driver.switch_to.window(janela_pedidos)
-        print("Mudando para a nova janela de pedidos.")
+        self.wait.until(EC.number_of_windows_to_be(2))
+        aba_pedidos_handle = [
+            h for h in self.driver.window_handles if h != aba_principal_handle
+        ][0]
+        self.driver.switch_to.window(aba_pedidos_handle)
 
-        while True:
-            self._verificar_parada()
-            try:
-                xpath_novo_pedido = "//tr[@title='Novo Pedido']/td[3]/a"
-                primeiro_pedido_link = self.short_wait.until(
-                    EC.presence_of_element_located((By.XPATH, xpath_novo_pedido))
+        url_da_pagina_de_busca = self.driver.current_url
+        print(f"URL da página de busca definida: {url_da_pagina_de_busca}")
+
+        lista_para_processar = (
+            self.pedidos_especificos or self._ler_todos_pedidos_do_site()
+        )
+
+        if not lista_para_processar:
+            print("Nenhuma lista de pedidos para processar.")
+            return
+
+        for pedido in lista_para_processar:
+            self._buscar_e_processar_pedidos(
+                pedido.strip(), aba_pedidos_handle, url_da_pagina_de_busca
+            )
+        print("\nProcesso finalizado para todos os pedidos da lista.")
+
+    def enviar_email(self):
+        if not self.pedidos_sucesso and not self.pedidos_falha:
+            print("Nenhum processamento realizado, e-mail não será enviado.")
+            return
+
+        print("\n---> Preparando para enviar e-mail de status...")
+        try:
+            outlook = Dispatch("outlook.application")
+            mail = outlook.CreateItem(0)
+            mail.To = self.user_mail
+            mail.CC = self.cc_mail
+
+            subject_parts = []
+            if self.pedidos_sucesso:
+                subject_parts.append("SUCESSO")
+            if self.pedidos_falha:
+                subject_parts.append("FALHA")
+            status_subject = "/".join(subject_parts)
+            data_hoje = datetime.datetime.now().strftime("%d/%m/%Y")
+            mail.Subject = f"Download de Pedidos - {status_subject} - {data_hoje}"
+
+            qtde_sucesso = len(self.pedidos_sucesso)
+            qtde_falha = len(self.pedidos_falha)
+            total_pedidos = qtde_sucesso + qtde_falha
+
+            texto_total = (
+                f"<b>{total_pedidos} pedido processado.</b>"
+                if total_pedidos == 1
+                else f"<b>{total_pedidos} pedidos processados.</b>"
+            )
+
+            html_body = f"""
+            <p>Olá,</p>
+            <p>A rotina de download de pedidos foi finalizada.</p>
+            <p>{texto_total}</p>
+            """
+
+            if self.pedidos_sucesso:
+                texto_sucesso = (
+                    f"{qtde_sucesso} arquivo processado com sucesso."
+                    if qtde_sucesso == 1
+                    else f"{qtde_sucesso} arquivos processados com sucesso."
                 )
+                html_body += f'<p><b style="color:green;">{texto_sucesso}</b></p>'
 
-                linha_do_pedido = primeiro_pedido_link.find_element(
-                    By.XPATH, "./ancestor::tr"
+            if self.pedidos_falha:
+                texto_falha_header = (
+                    f"{qtde_falha} arquivo falhou ao ser processado:"
+                    if qtde_falha == 1
+                    else f"{qtde_falha} arquivos falharam ao ser processados:"
                 )
-                novo_codigo_elemento = linha_do_pedido.find_element(
-                    By.XPATH, ".//td[4]"
-                )
-                novo_codigo_texto = novo_codigo_elemento.text.strip()
-                novo_prefixo_formatado = (
-                    novo_codigo_texto.replace(" ", "_")
-                    .replace("/", "-")
-                    .replace(".", "")
-                )
+                lista_pedidos_falha_html = "<br>".join(sorted(list(self.pedidos_falha)))
+                html_body += f"""
+                <p><b style="color:red;">{texto_falha_header}</b></p>
+                <p>{lista_pedidos_falha_html}</p>
+                """
 
-                # --- Inciando processo de download do PDF ---
-                time.sleep(0.5)
-                print(
-                    f"\nProcessando pedido: {primeiro_pedido_link.text.strip()} | Código para nome: {novo_codigo_texto}"
-                )
-                primeiro_pedido_link.click()
-                time.sleep(2)
+            # SENSÍVEL: Assinatura do bot generalizada.
+            html_body += "<p>Att,<br>Bot de Automação</p>"
+            mail.HTMLBody = html_body
+            mail.Send()
+            print("Email de status enviado com sucesso!")
 
-                links_pdf = self.driver.find_elements(
-                    By.PARTIAL_LINK_TEXT, "Pedido em PDF"
-                )
-                if not links_pdf:
-                    print("AVISO: Nenhum link de PDF encontrado. Pulando.")
-                    self.driver.back()
-                    time.sleep(2)
-                    continue
-
-                links_pdf[-1].click()
-                print("Clicado no link do PDF.")
-                time.sleep(2)
-
-                janela_pdf = self.driver.window_handles[-1]
-                self.driver.switch_to.window(janela_pdf)
-                print("Acessada a nova janela do PDF.")
-
-                # ---> Iniciando clique no botão de download dentro do PDF
-                # ATENÇÃO: O seletor 'baseSvg' pode ser específico. Mantenha se funcionar.
-                campo_download = "baseSvg"
-                botao_download = self._find_first_element(campo_download)
-                botao_download.click()
-                print("Clicado no botão download do PDF.")
-
-                self._renomear_ultimo_arquivo_baixado(
-                    self.tratamento.caminho_pasta_pdf, novo_prefixo_formatado
-                )
-
-                self.driver.close()
-                self.driver.switch_to.window(janela_pedidos)
-                print("Fechada a janela do PDF e retornado para a lista de pedidos.")
-
-            except TimeoutException:
-                print("\nNão há mais 'Novos Pedidos' para processar.")
-                break
-            except StaleElementReferenceException:
-                print("A página foi atualizada. Tentando encontrar o próximo pedido...")
-                continue
-            except Exception as e:
-                print(f"Ocorreu um erro inesperado no loop: {e}. Tentando novamente...")
-                self.driver.refresh()
-                time.sleep(3)
-                continue
-        self.driver.close()
+        except Exception as e:
+            print(f"Ocorreu um erro ao tentar enviar o e-mail: {e}")
+            messagebox.showerror(
+                "Erro de Email", f"Não foi possível enviar o e-mail de status: {e}"
+            )
 
     def executar(self):
+        self.pedidos_sucesso.clear()
+        self.pedidos_falha.clear()
         pythoncom.CoInitialize()
         try:
-            self._iniciar_driver()
             self._verificar_parada()
             self._fazer_login()
             self._verificar_parada()
-            print("\nLogin concluído. Navegando para baixar os arquivos...")
             self._navegar_e_baixar_pdfs()
-            print("\nDownloads finalizados.")
-
-            return {
-                "sucesso": True,
-                "mensagem": "Download e renomeação de arquivos concluídos com sucesso!",
-            }
-
+            quantidade_final = len(self.pedidos_sucesso)
+            return True, "Download de arquivos concluído com sucesso!", quantidade_final
         except InterruptedError as e:
-            return {"sucesso": False, "mensagem": str(e)}
+            return False, str(e), 0
         except (TimeoutException, RuntimeError, WebDriverException) as e:
             messagebox.showerror("Erro de Automação", str(e))
-            return {"sucesso": False, "mensagem": str(e)}
+            return False, str(e), 0
         except Exception as e:
             traceback.print_exc()
-            return {"sucesso": False, "mensagem": f"Erro fatal na automação: {e}"}
+            return False, f"Erro fatal na automação: {e}", 0
         finally:
+            self.enviar_email()
             if self.driver:
                 self.driver.quit()
                 print("Driver finalizado.")
