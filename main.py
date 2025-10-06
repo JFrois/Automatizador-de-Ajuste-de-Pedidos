@@ -1,5 +1,5 @@
 # ---> 0. Importar as bibliotecas necessárias
-from datetime import datetime, time
+from datetime import datetime
 from time import strftime
 import traceback
 import pandas as pd
@@ -8,18 +8,17 @@ import os
 import re
 from win32com.client import Dispatch
 import customtkinter as ctk
+from CTkToolTip import CTkToolTip
 from tkinter import messagebox
 import threading
 import pythoncom
 import shutil
 from tkinter import filedialog
-# SENSÍVEL: O nome do arquivo de automação foi mantido, mas certifique-se de que ele não contém informações sensíveis.
-from acessar_site_pedidos import AutomacaoPedidos
+from web_automation import AutomacaoPedidos
 
 
-# ---> Função para identificar o último log
+# ---> Funções de Log (mantidas)
 def encontra_ultimo_arquivo(folder_path, base_name):
-    # ---> Encontra o arquivo de log com o maior número sequencial.
     try:
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
@@ -29,31 +28,20 @@ def encontra_ultimo_arquivo(folder_path, base_name):
         ]
         if not arquivos_data:
             return None
-        ultimo_arquivo = max(
-            arquivos_data, key=lambda x: int(re.search(r"(\d+)", x).group())
-        )
-        return ultimo_arquivo
+        return max(arquivos_data, key=lambda x: int(re.search(r"(\\d+)", x).group()))
     except Exception as e:
         print(f"Erro ao encontrar último arquivo de log: {e}")
         return None
 
 
-# ---> Função para criar o próximo arquivo de log
 def cria_proximo_arquivo(folder_path, base_name):
-    # ---> Gera o nome para o próximo arquivo de log sequencial.
     try:
         ultimo_arquivo = encontra_ultimo_arquivo(folder_path, base_name)
-        if ultimo_arquivo:
-            ultimo_numero_match = re.search(r"(\d+)", ultimo_arquivo)
-            ultimo_numero = (
-                int(ultimo_numero_match.group()) if ultimo_numero_match else 0
-            )
-            proximo_numero = ultimo_numero + 1
-        else:
-            proximo_numero = 1
-        nome_proximo_arquivo = f"{base_name}{proximo_numero}.csv"
-        proximo_caminho = os.path.join(folder_path, nome_proximo_arquivo)
-        return proximo_caminho
+        ultimo_numero = (
+            int(re.search(r"(\\d+)", ultimo_arquivo).group()) if ultimo_arquivo else 0
+        )
+        proximo_numero = ultimo_numero + 1
+        return os.path.join(folder_path, f"{base_name}{proximo_numero}.csv")
     except Exception as e:
         print(f"Erro ao criar próximo arquivo de log: {e}")
         return os.path.join(folder_path, f"{base_name}1.csv")
@@ -63,20 +51,18 @@ def cria_proximo_arquivo(folder_path, base_name):
 class tratamentoDados:
     def __init__(self):
         self.user = os.getlogin()
-        # SENSÍVEL: Domínio de e-mail genérico. Altere para o seu domínio se necessário.
-        self.user_mail = f"{self.user}@sua_empresa.com"
+        # TODO: Altere para um domínio de e-mail genérico
+        self.user_mail = f"{self.user}@yourcompany.com"
         self.cc_mail = ""
         self.caminho_pasta_pdf = ""
         self.caminho_saida_excel = ""
-        # SENSÍVEL: Caminho de rede interno substituído por um caminho local genérico.
-        # Altere para o caminho de logs da sua aplicação.
-        self.caminho_log = r"C:\RPA\Logs"
+        # TODO: Substitua o caminho de rede por um caminho local ou relativo para o portfólio
+        self.caminho_log = r".\Logs" # Exemplo: "C:\Automation\Logs"
         self.dados_extraidos = []
         self.pedidos_sucesso = set()
         self.pedidos_falha = set()
         self.pedidos_existentes = set()
 
-    # Processamento dos arquivos que já estão na pasta
     def processar_arquivos_baixados(self, evento_parar):
         pythoncom.CoInitialize()
         try:
@@ -85,19 +71,25 @@ class tratamentoDados:
             self.pedidos_falha.clear()
             self.pedidos_existentes.clear()
 
+            if not os.path.isdir(self.caminho_pasta_pdf):
+                return {
+                    "sucesso": False,
+                    "mensagem": "O caminho especificado para os PDFs não é uma pasta válida.",
+                    "quantidade": 0,
+                    "tipo_email": "processamento",
+                }
             arquivos_pdf = [
                 f
                 for f in os.listdir(self.caminho_pasta_pdf)
                 if f.lower().endswith(".pdf")
             ]
-            quantidade_final = 0
             if not arquivos_pdf:
-                return (
-                    False,
-                    "Nenhum arquivo PDF encontrado na pasta para processar.",
-                    quantidade_final,
-                )
-
+                return {
+                    "sucesso": True,
+                    "mensagem": "Nenhum arquivo PDF encontrado para processar.",
+                    "quantidade": 0,
+                    "tipo_email": "processamento",
+                }
             for nome_arquivo in arquivos_pdf:
                 if evento_parar.is_set():
                     print("Processamento interrompido pelo usuário.")
@@ -111,31 +103,30 @@ class tratamentoDados:
                     self._mover_arquivo_processado(
                         nome_arquivo, "Falha_Extracao", sucesso=False
                     )
+
             total_pedidos = (
                 len(self.pedidos_sucesso)
                 + len(self.pedidos_falha)
                 + len(self.pedidos_existentes)
             )
-            quantidade_final = total_pedidos
+            if self.dados_extraidos:
+                self.exportar_para_excel()
 
-            self.exportar_para_excel()
-            self.enviar_email()
+            sucesso_geral = not bool(self.pedidos_falha)
+            mensagem = f"Processamento concluído. Sucesso: {len(self.pedidos_sucesso)}, Falha: {len(self.pedidos_falha)}, Existentes: {len(self.pedidos_existentes)}."
 
-            if self.pedidos_falha:
-                return (
-                    False,
-                    f"{len(self.pedidos_falha)} arquivo(s) falharam no processamento.",
-                    quantidade_final,
-                )
-            return (
-                True,
-                "Todos os arquivos foram processados com sucesso.",
-                quantidade_final,
-            )
+            return {
+                "sucesso": sucesso_geral,
+                "mensagem": mensagem,
+                "quantidade": total_pedidos,
+                "pedidos_sucesso": self.pedidos_sucesso,
+                "pedidos_falha": self.pedidos_falha,
+                "pedidos_existentes": self.pedidos_existentes,
+                "tipo_email": "processamento",
+            }
         finally:
             pythoncom.CoUninitialize()
 
-    # ---> 2. Extrai o texto de UM arquivo PDF
     def extrair_texto_pdf(self, caminho_arquivo):
         conteudo_linhas = []
         try:
@@ -150,28 +141,24 @@ class tratamentoDados:
             print(f"Erro ao ler o arquivo {caminho_arquivo}: {e}")
             return None
 
-    # ---> 3. Organizar arquivos em pastas de processados e não processados
-    def _mover_arquivo_processado(self, nome_arquivo, cidade, sucesso):
+    def _mover_arquivo_processado(self, nome_arquivo, location, sucesso):
         try:
             pasta_status = "Processados" if sucesso else "Nao Processados"
             caminho_origem = os.path.join(self.caminho_pasta_pdf, nome_arquivo)
-            pasta_destino = os.path.join(self.caminho_pasta_pdf, cidade, pasta_status)
+            pasta_destino = os.path.join(self.caminho_pasta_pdf, location, pasta_status)
             os.makedirs(pasta_destino, exist_ok=True)
-
             caminho_final_arquivo = os.path.join(pasta_destino, nome_arquivo)
             if os.path.exists(caminho_final_arquivo):
                 print(
-                    f"AVISO: Arquivo '{nome_arquivo}' já existe no destino. Não será movido."
+                    f"AVISO: Arquivo '{nome_arquivo}' já existe no destino. O original será removido."
                 )
                 if nome_arquivo in self.pedidos_sucesso:
                     self.pedidos_sucesso.remove(nome_arquivo)
                 self.pedidos_existentes.add(nome_arquivo)
                 os.remove(caminho_origem)
                 return
-
             shutil.move(caminho_origem, pasta_destino)
-            print(f"Arquivo '{nome_arquivo}' movido para a pasta '{pasta_status}'.")
-
+            print(f"Arquivo '{nome_arquivo}' movido para a pasta '{pasta_destino}'.")
         except Exception as e:
             print(f"ERRO ao tentar mover o arquivo '{nome_arquivo}': {e}")
             if nome_arquivo in self.pedidos_sucesso:
@@ -179,7 +166,6 @@ class tratamentoDados:
             self.pedidos_falha.add(nome_arquivo)
 
     @staticmethod
-    # ---> Função: extrair_preco
     def extrair_preco(texto):
         if not texto:
             return 0.0
@@ -201,14 +187,12 @@ class tratamentoDados:
     def extrair_quantidade_principal(texto):
         if not texto:
             return 0
-        # Procura por um ou mais dígitos seguidos de "PCS"
         match = re.search(r"(\d+)\s*PCS", texto, re.I)
         if match:
             return int(match.group(1))
-        return 0  # Retorna 0 se não encontrar
+        return 0
 
     @staticmethod
-    # ---> Função: extrair_quantidade
     def extrair_quantidade(texto):
         if not texto:
             return 1
@@ -225,52 +209,48 @@ class tratamentoDados:
             return int(match.group(1))
         return 1
 
-    # ---> 4. Processa o conteúdo extraído de UM PDF
     def processar_conteudo(self, conteudo_linhas, nome_arquivo):
         try:
             texto_completo = "\n".join(conteudo_linhas)
-
-            # SENSÍVEL: Nomes de cidades substituídos por placeholders.
-            # Altere "Cidade A" e "Cidade B" para as palavras-chave que identificam a localidade nos seus PDFs.
-            linha_cidade = next(
-                (l for l in conteudo_linhas if "Cidade A" in l or "Cidade B" in l), ""
+            # Termos genéricos para localização
+            linha_location = next(
+                (l for l in conteudo_linhas if "LocationA" in l or "LocationB" in l), ""
             )
-            cidade = "Cidade A" if "Cidade A" in linha_cidade else "Cidade B"
-            print(f"PDF da loja de {cidade}\n")
-            dados = {"Arquivo": nome_arquivo, "Cidade": cidade}
-
+            location = "LocationA" if "LocationA" in linha_location else "LocationB"
+            print(f"PDF da unidade de {location}\n")
+            dados = {"Arquivo": nome_arquivo, "Location": location}
             codigo_pedido_completo = "Não Encontrado"
-            # NOTE: Esta expressão regular busca por um padrão de número de pedido específico.
-            # Pode precisar de ajuste dependendo do formato dos seus documentos.
+            
+            # Regex genérico para número de pedido
             match_pedido_obj = re.search(
-                r"Purchase Order No\.\s*\n\s*([A-Z]\s*\d+\s*\d+)",
+                r"Order No\.\s*\n\s*([A-Z]\s*\d+\s*\d+)",
                 texto_completo,
                 re.DOTALL,
             )
             if not match_pedido_obj:
                 match_pedido_obj = re.search(r"([A-Z]\s*\d{2}\s*\d{6})", texto_completo)
-
+            
             if match_pedido_obj:
                 codigo_pedido_completo = re.sub(r"\s", "", match_pedido_obj.group(1))
-
             dados["Codigo pedido"] = codigo_pedido_completo
-
             dados["Codigo peça"] = (
                 nome_arquivo.split("_")[0] if nome_arquivo else "Não Encontrado"
             )
-            dados_foram_extraidos = False
+            dados["Código pedido formatado"] = nome_arquivo.split("_")[0].replace(
+                " ", ""
+            )
 
+            dados_foram_extraidos = False
+            # Termos genéricos para tipo de alteração
             alteracao_pedido = any("Amendment" in linha for linha in conteudo_linhas)
             is_price_update = (
                 "PRICE CHANGE" in texto_completo or "PRICE ADJUSTMENT" in texto_completo
             )
-
-            # ---> Pedido cancelamento
             linha_cancelamento = next(
                 (l for l in conteudo_linhas if "CANCELLATION" in l.upper()), None
             )
 
-            if linha_cancelamento == None:
+            if linha_cancelamento is None:
                 if codigo_pedido_completo != "Não Encontrado" and (
                     codigo_pedido_completo.startswith("P")
                     or codigo_pedido_completo.startswith("F")
@@ -293,7 +273,6 @@ class tratamentoDados:
                         dados["Preço Peça"] = valor_nova_peca
                         dados["Preço por Peça"] = quantidade_por_preco
                     dados_foram_extraidos = True
-
                 else:
                     if alteracao_pedido:
                         ancora_datas = next(
@@ -318,9 +297,7 @@ class tratamentoDados:
                                 if len(datas_encontradas) > 2
                                 else "Não Encontrado"
                             )
-
                         linha_antigo, linha_novo = None, None
-
                         idx_antigo = -1
                         for i, linha in enumerate(conteudo_linhas):
                             if "OLD" in linha and ("BRL" in linha or "****" in linha):
@@ -338,7 +315,6 @@ class tratamentoDados:
                                 ):
                                     linha_novo = conteudo_linhas[i]
                                     break
-
                         if not linha_antigo:
                             linha_antigo = next(
                                 (
@@ -359,8 +335,6 @@ class tratamentoDados:
                                 ),
                                 None,
                             )
-
-                        # ---> Custo Logístico
                         if "LOGISTIC COSTS" in texto_completo:
                             dados["Tipo de Alteração"] = "CUSTO LOGISTICO"
                             linha_total = next(
@@ -401,8 +375,6 @@ class tratamentoDados:
                                 linha_total or linha_antigo
                             )
                             dados_foram_extraidos = True
-
-                        # ---> Prazo de Pagamento
                         elif "TERMS OF PAYMENT" in texto_completo:
                             dados["Tipo de Alteração"] = "PRAZO PAGAMENTO"
                             linha_prazo_antigo = next(
@@ -450,10 +422,7 @@ class tratamentoDados:
                             dados["Preço por peça"] = self.extrair_quantidade(
                                 linha_antigo
                             )
-
                             dados_foram_extraidos = True
-
-                        # ---> Alteração de Preço
                         elif is_price_update:
                             dados["Tipo de Alteração"] = "ALTERAÇÃO DE PREÇO"
                             dados["Preço Antigo"] = self.extrair_preco(linha_antigo)
@@ -462,14 +431,9 @@ class tratamentoDados:
                                 linha_antigo
                             )
                             dados_foram_extraidos = True
-
-                        # ---> Apenas alteração validade
                         elif ancora_datas:
                             dados["Tipo de Alteração"] = "ALTERAÇÃO VALIDADE"
-
                             dados_foram_extraidos = True
-
-                    # ---> Pedido novo
                     else:
                         dados["Tipo de Alteração"] = "PEDIDO NOVO"
                         linha_pecas = next(
@@ -496,39 +460,50 @@ class tratamentoDados:
             if dados_foram_extraidos:
                 self.dados_extraidos.append(dados)
                 self.pedidos_sucesso.add(nome_arquivo)
-                self._mover_arquivo_processado(nome_arquivo, cidade, sucesso=True)
+                self._mover_arquivo_processado(nome_arquivo, location, sucesso=True)
             else:
                 print(
                     f"Tipo de alteração não identificado para o arquivo {nome_arquivo}."
                 )
                 self.pedidos_falha.add(nome_arquivo)
-                self._mover_arquivo_processado(nome_arquivo, cidade, sucesso=False)
-
+                self._mover_arquivo_processado(nome_arquivo, location, sucesso=False)
         except Exception as e:
             print(f"Erro de processamento no arquivo {nome_arquivo}. Erro: {e}")
             self.pedidos_falha.add(nome_arquivo)
-            # SENSÍVEL: Lógica de fallback também foi generalizada.
             linha_cidade_fallback = next(
-                (l for l in conteudo_linhas if "Cidade A" in l or "Cidade B" in l), ""
+                (l for l in conteudo_linhas if "LocationA" in l or "LocationB" in l), ""
             )
-            cidade_extraida = (
-                "Cidade A" if "Cidade A" in linha_cidade_fallback else "Cidade B"
+            location_extraida = (
+                "LocationA" if "LocationA" in linha_cidade_fallback else "LocationB"
             )
-            self._mover_arquivo_processado(nome_arquivo, cidade_extraida, sucesso=False)
+            self._mover_arquivo_processado(nome_arquivo, location_extraida, sucesso=False)
             traceback.print_exc()
 
-    # ---> 5. Exporta a lista de dados para um único arquivo Excel com cabeçalhos específicos
     def exportar_para_excel(self):
         if not self.dados_extraidos:
             print("\nNenhum dado foi extraído para ser exportado.")
             return
         try:
             cabecalhos_especificos = {
+                "RESUMO": [
+                    "Arquivo",
+                    "Codigo pedido",
+                    "Codigo peça",
+                    "Código pedido formatado",
+                    "Valor novo",
+                    "Valor embalagem",
+                    "Valor transporte",
+                    "Valor final",
+                    "Valor código",
+                    "Documento X Codigo é Válido",
+                    "Preço Peça",
+                    "Preço por Peça",
+                ],
                 "PRAZO PAGAMENTO": [
                     "Arquivo",
                     "Codigo pedido",
                     "Codigo peça",
-                    "Cidade",
+                    "Location",
                     "Tipo de Alteração",
                     "Data da Alteração",
                     "Data validade antiga",
@@ -543,7 +518,7 @@ class tratamentoDados:
                     "Arquivo",
                     "Codigo pedido",
                     "Codigo peça",
-                    "Cidade",
+                    "Location",
                     "Tipo de Alteração",
                     "Data da Alteração",
                     "Data validade antiga",
@@ -556,7 +531,7 @@ class tratamentoDados:
                     "Arquivo",
                     "Codigo pedido",
                     "Codigo peça",
-                    "Cidade",
+                    "Location",
                     "Tipo de Alteração",
                     "Data da Alteração",
                     "Data validade antiga",
@@ -574,7 +549,7 @@ class tratamentoDados:
                     "Arquivo",
                     "Codigo pedido",
                     "Codigo peça",
-                    "Cidade",
+                    "Location",
                     "Tipo de Alteração",
                     "Preço Peça",
                     "Preço por Peça",
@@ -583,7 +558,7 @@ class tratamentoDados:
                     "Arquivo",
                     "Codigo pedido",
                     "Codigo peça",
-                    "Cidade",
+                    "Location",
                     "Tipo de Alteração",
                     "Data da Alteração",
                     "Data validade antiga",
@@ -593,14 +568,14 @@ class tratamentoDados:
                     "Arquivo",
                     "Codigo pedido",
                     "Codigo peça",
-                    "Cidade",
+                    "Location",
                     "Tipo de Alteração",
                 ],
                 "FECHADO": [
                     "Arquivo",
                     "Codigo pedido",
                     "Codigo peça",
-                    "Cidade",
+                    "Location",
                     "Tipo de Alteração",
                     "Quantidade",
                     "Preço Peça",
@@ -608,8 +583,19 @@ class tratamentoDados:
                 ],
             }
             df = pd.DataFrame(self.dados_extraidos)
+
             with pd.ExcelWriter(self.caminho_saida_excel, engine="openpyxl") as writer:
-                ordem_abas = [
+                df_resumo = df.copy()
+                colunas_resumo = cabecalhos_especificos["RESUMO"]
+
+                for col in colunas_resumo:
+                    if col not in df_resumo.columns:
+                        df_resumo[col] = None
+
+                df_resumo_final = df_resumo[colunas_resumo]
+                df_resumo_final.to_excel(writer, sheet_name="RESUMO", index=False)
+
+                ordem_abas_especificas = [
                     "PEDIDO NOVO",
                     "ALTERAÇÃO DE PREÇO",
                     "CUSTO LOGISTICO",
@@ -618,27 +604,34 @@ class tratamentoDados:
                     "CANCELAMENTO",
                     "FECHADO",
                 ]
+
                 categorias_presentes = [
-                    cat for cat in ordem_abas if cat in df["Tipo de Alteração"].unique()
+                    cat
+                    for cat in ordem_abas_especificas
+                    if cat in df["Tipo de Alteração"].unique()
                 ]
 
-                if not categorias_presentes:
+                if not categorias_presentes and df.empty:
                     print(
                         "\nALERTA: Nenhum dado com 'Tipo de Alteração' válido foi encontrado para exportar."
                     )
                     return
+
                 for tipo_alteracao in categorias_presentes:
                     df_filtrado = df[df["Tipo de Alteração"] == tipo_alteracao].copy()
                     colunas_desejadas = cabecalhos_especificos.get(
                         tipo_alteracao, df_filtrado.columns.tolist()
                     )
+
                     for col in colunas_desejadas:
                         if col not in df_filtrado.columns:
                             df_filtrado[col] = None
+
                     df_final_aba = df_filtrado[colunas_desejadas]
                     df_final_aba.to_excel(
                         writer, sheet_name=str(tipo_alteracao), index=False
                     )
+
             print(
                 f"\n---> DataFrame exportado com sucesso para: {self.caminho_saida_excel}"
             )
@@ -646,233 +639,141 @@ class tratamentoDados:
             print(f"\n---> Ocorreu um erro ao exportar para o Excel: {e}")
             traceback.print_exc()
 
-    # ---> 6. Envia e-mail com o resultado
-    def enviar_email(self):
-        if (
-            not self.pedidos_sucesso
-            and not self.pedidos_falha
-            and not self.pedidos_existentes
-        ):
-            print("Nenhum processamento realizado, e-mail não enviado.")
-            return
 
-        try:
-            outlook = Dispatch("outlook.application")
-            mail = outlook.CreateItem(0)
-            mail.To = self.user_mail
-            mail.CC = self.cc_mail
-
-            subject_parts = []
-            if self.pedidos_sucesso:
-                subject_parts.append("SUCESSO")
-            if self.pedidos_falha or self.pedidos_existentes:
-                subject_parts.append("AVISO")
-            if self.pedidos_falha:
-                subject_parts.append("FALHA")
-
-            mail.Subject = f"Ajuste de Preços - {'/'.join(subject_parts)} - {datetime.now().strftime('%d/%m/%Y')}"
-
-            qtde_sucesso = len(self.pedidos_sucesso)
-            qtde_falha = len(self.pedidos_falha)
-            qtde_existentes = len(self.pedidos_existentes)
-
-            total_pedidos = qtde_falha + qtde_sucesso + qtde_existentes
-
-            s_total = "s" if total_pedidos > 1 else ""
-            texto_total = (
-                f"<b>{total_pedidos} arquivo{s_total} verificado{s_total}.</b>"
-            )
-
-            html_body = [
-                "<p>Olá,</p>",
-                "<p>A rotina de ajuste de preços foi finalizada.</p>",
-                f"<p>{texto_total}</p>",
-            ]
-
-            if self.pedidos_sucesso:
-                s_sucesso = "s" if qtde_sucesso > 1 else ""
-                texto_sucesso = f"{qtde_sucesso} arquivo{s_sucesso} processado{s_sucesso} com sucesso."
-                html_body.append(f'<p><b style="color:green;">{texto_sucesso}</b></p>')
-                if os.path.exists(self.caminho_saida_excel):
-                    mail.Attachments.Add(os.path.abspath(self.caminho_saida_excel))
-
-            if self.pedidos_existentes:
-                s_exist = "s" if qtde_existentes > 1 else ""
-                verbo_exist = "m" if qtde_existentes > 1 else ""
-                texto_exist = f"{qtde_existentes} arquivo{s_exist} não foi/foram movido{s_exist} pois já existe{verbo_exist} no destino."
-                html_body.append(f'<p><b style="color:yellow;">{texto_exist}</b></p>')
-
-            if self.pedidos_falha:
-                s_falha = "s" if qtde_falha > 1 else ""
-                verbo_falha = "ram" if qtde_falha > 1 else "u"
-                texto_falha = f"{qtde_falha} arquivo{s_falha} falha{verbo_falha} no processamento."
-                html_body.append(f'<p><b style="color:red;">{texto_falha}</b></p>')
-            
-            # SENSÍVEL: Assinatura do bot generalizada.
-            html_body.append("<p>Att,<br>Bot de Automação</p>")
-
-            mail.HTMLBody = "".join(html_body)
-            mail.Send()
-            print("Email de status enviado com sucesso!")
-
-        except Exception as e:
-            print(f"Ocorreu um erro ao tentar enviar o e-mail: {e}")
-            messagebox.showerror(
-                "Erro de Email", f"Não foi possível enviar o e-mail: {e}"
-            )
-
-
-# ===> Classe da Interface Gráfica
 class App(ctk.CTk):
-    # ---> Inicialização da interface
     def __init__(self):
         super().__init__()
         self.tratamento = tratamentoDados()
         self.automacao_thread = None
         self.evento_parar = threading.Event()
-        # SENSÍVEL: Título da janela generalizado.
-        self.title("LEITOR DE PDF")
-        self.minsize(700, 600)
+        self.title("RPA PDF Processor - Order Automation")
+        self.minsize(850, 600)
         ctk.set_appearance_mode("dark")
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
         self.criar_widgets()
 
-    # ---> Função para criar os widgets da interface
     def criar_widgets(self):
         main_frame = ctk.CTkFrame(self, fg_color="transparent")
         main_frame.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
         main_frame.grid_columnconfigure(0, weight=1)
-
         status_font = ctk.CTkFont(family="Arial", size=12)
         self.btn_font = ctk.CTkFont(family="Arial", size=14, weight="bold")
-
-        # --- Frame para os campos de entrada ---
         inputs_frame = ctk.CTkFrame(main_frame)
         inputs_frame.grid(row=0, column=0, sticky="ew", pady=(0, 20))
         inputs_frame.grid_columnconfigure(1, weight=1)
-
-        # ---> Campo de entrada para Login
         ctk.CTkLabel(inputs_frame, text="Login:", font=status_font).grid(
             row=0, column=0, padx=10, pady=(10, 5), sticky="w"
         )
         self.entry_login = ctk.CTkEntry(
             inputs_frame,
             font=status_font,
-            # SENSÍVEL: Texto do placeholder generalizado.
-            placeholder_text="Informe o login do portal de pedidos",
+            placeholder_text="Informe o login do portal",
         )
         self.entry_login.grid(row=0, column=1, padx=10, pady=(10, 5), sticky="ew")
-
-        # ---> Campo de entrada para senha
         ctk.CTkLabel(inputs_frame, text="Senha:", font=status_font).grid(
-            row=1, column=0, padx=10, pady=(10, 5), sticky="w"
+            row=1, column=0, padx=10, pady=5, sticky="w"
         )
         self.entry_senha = ctk.CTkEntry(
             inputs_frame,
             show="*",
             font=status_font,
-            # SENSÍVEL: Texto do placeholder generalizado.
-            placeholder_text="Informe a senha do portal de pedidos",
+            placeholder_text="Informe a senha do portal",
         )
-        self.entry_senha.grid(row=1, column=1, padx=10, pady=(10, 5), sticky="ew")
-
-        # ---> Mostrar senha
+        self.entry_senha.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
         self.check_mostrar_pwd = ctk.CTkCheckBox(
             inputs_frame,
             text="Mostrar senha",
             font=status_font,
             command=self.mostrar_senha,
         )
-        self.check_mostrar_pwd.grid(row=1, column=2, padx=10, pady=10, sticky="w")
-
-        # ---> Campo de entrada para Autenticação de dois fatores
-        ctk.CTkLabel(inputs_frame, text="Código TOTP", font=status_font).grid(
-            row=2, column=0, padx=10, pady=(10, 5), sticky="w"
+        self.check_mostrar_pwd.grid(row=1, column=2, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(inputs_frame, text="Código TOTP:", font=status_font).grid(
+            row=2, column=0, padx=10, pady=5, sticky="w"
         )
         self.entry_codigo = ctk.CTkEntry(
-            inputs_frame,
-            font=status_font,
-            # SENSÍVEL: Texto do placeholder generalizado.
-            placeholder_text="Informe o código TOTP para autenticação MFA",
+            inputs_frame, font=status_font, placeholder_text="Informe o código 2FA"
         )
-        self.entry_codigo.grid(row=2, column=1, padx=10, pady=(10, 5), sticky="ew")
-
-        # ---> Campo de entrada para pesquisa pedido específico
-        ctk.CTkLabel(inputs_frame, text="Part Number(s)", font=status_font).grid(
-            row=3, column=0, padx=10, pady=(10, 5), sticky="w"
+        self.entry_codigo.grid(row=2, column=1, padx=10, pady=5, sticky="ew")
+        ctk.CTkLabel(inputs_frame, text="Part Number(s):", font=status_font).grid(
+            row=3, column=0, padx=10, pady=5, sticky="w"
         )
         self.entry_pedido = ctk.CTkEntry(
             inputs_frame,
             font=status_font,
-            placeholder_text="Informe os Part Numbers separados por  ' , '  ou  ' ; '",
+            placeholder_text="Informe os Part Numbers separados por vírgula ou ponto e vírgula",
         )
-        self.entry_pedido.grid(row=3, column=1, padx=10, pady=(10, 5), sticky="ew")
-
-        # ---> Campo de entrada para e-mail
-        # SENSÍVEL: Label do campo de e-mail generalizado.
-        ctk.CTkLabel(inputs_frame, text="E-mail (Cópia):", font=status_font).grid(
-            row=4, column=0, padx=10, pady=(10, 5), sticky="w"
+        self.entry_pedido.grid(row=3, column=1, padx=10, pady=5, sticky="ew")
+        self.btn_carregar_planilha = ctk.CTkButton(
+            inputs_frame,
+            text="Carregar Planilha",
+            font=status_font,
+            command=self.carregar_planilha_pedidos,
+        )
+        self.btn_carregar_planilha.grid(row=3, column=2, padx=10, pady=5)
+        ctk.CTkLabel(inputs_frame, text="E-mail (cópia):", font=status_font).grid(
+            row=4, column=0, padx=10, pady=5, sticky="w"
         )
         self.entry_email = ctk.CTkEntry(
             inputs_frame,
             font=status_font,
-            # SENSÍVEL: Texto do placeholder generalizado.
-            placeholder_text="Informe o e-mail para receber a notificação em cópia",
+            placeholder_text="Informe e-mail adicional para receber os resultados",
         )
-        self.entry_email.grid(row=4, column=1, padx=10, pady=(10, 5), sticky="ew")
-
-        # ---> Campo de entrada para pasta de PDFs
+        self.entry_email.grid(row=4, column=1, padx=10, pady=5, sticky="ew")
         ctk.CTkLabel(inputs_frame, text="Pasta dos PDFs:", font=status_font).grid(
             row=5, column=0, padx=10, pady=(5, 10), sticky="w"
         )
         self.entry_pdf_path = ctk.CTkEntry(
             inputs_frame,
             font=status_font,
-            placeholder_text="Informe a pasta para salvar e processar os PDFs",
+            placeholder_text="Selecione a pasta para salvar e processar os PDFs",
         )
         self.entry_pdf_path.grid(row=5, column=1, padx=10, pady=(5, 10), sticky="ew")
-
-        # ---> Botão para selecionar pasta
-        ctk.CTkButton(
+        self.btn_pasta = ctk.CTkButton(
             inputs_frame,
             text="Selecionar Pasta",
             font=status_font,
             command=self.selecionar_pasta,
-        ).grid(row=5, column=2, padx=10, pady=(5, 10))
-
-        # --- Frame para os botões ---
+        )
+        self.btn_pasta.grid(row=5, column=2, padx=10, pady=(5, 10))
         action_frame = ctk.CTkFrame(main_frame)
         action_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        action_frame.grid_columnconfigure((0, 1, 2), weight=1)
+        action_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
-        # ---> Botão 1: Baixar PDFs
-        self.btn_baixar = ctk.CTkButton(
+        self.btn_baixar_todos = ctk.CTkButton(
             action_frame,
-            text="1. Baixar e Renomear PDFs",
+            text="1. Baixar Todos",
             font=self.btn_font,
             height=50,
-            fg_color="#007BFF",  # Azul
-            hover_color="#0056b3",
-            command=self.iniciar_download,
+            fg_color="#FFAE00",
+            hover_color="#9B6A00",
+            command=lambda: self.iniciar_download(modo="todos"),
         )
-        self.btn_baixar.grid(row=0, column=0, padx=10, pady=20, sticky="ew")
+        self.btn_baixar_todos.grid(row=0, column=0, padx=5, pady=10, sticky="ew")
 
-        # ---> Botão 2: Processar PDFs
+        self.btn_baixar_especifico = ctk.CTkButton(
+            action_frame,
+            text="2. Baixar Específicos",
+            font=self.btn_font,
+            height=50,
+            fg_color="#007BFF",
+            hover_color="#0056b3",
+            command=lambda: self.iniciar_download(modo="especificos"),
+        )
+        self.btn_baixar_especifico.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
         self.btn_processar = ctk.CTkButton(
             action_frame,
-            text="2. Processar PDFs Baixados",
+            text="3. Processar PDFs",
             font=self.btn_font,
             height=50,
             fg_color="#4CAF50",
             hover_color="#45a049",
             command=self.iniciar_processamento,
         )
-        self.btn_processar.grid(row=0, column=1, padx=10, pady=20, sticky="ew")
-
+        self.btn_processar.grid(row=0, column=2, padx=5, pady=10, sticky="ew")
         self.btn_parar = ctk.CTkButton(
             action_frame,
-            text="Parar Execução",
+            text="Parar",
             font=self.btn_font,
             height=50,
             fg_color="#f44336",
@@ -880,13 +781,75 @@ class App(ctk.CTk):
             command=self.parar_automacao,
             state="disabled",
         )
-        self.btn_parar.grid(row=0, column=2, padx=20, pady=20, sticky="ew")
+        self.btn_parar.grid(row=0, column=3, padx=10, pady=10, sticky="ew")
+        status_frame = ctk.CTkFrame(self, fg_color="transparent")
+        status_frame.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="ew")
+        status_frame.grid_columnconfigure(0, weight=1)
         self.return_user = ctk.CTkLabel(
-            main_frame, text="Pronto para iniciar.", font=status_font
+            status_frame, text="Pronto para iniciar.", font=status_font
         )
-        self.return_user.grid(row=2, column=0, pady=10, sticky="ew")
+        self.return_user.grid(row=0, column=0, sticky="ew")
 
-    # ---> Função para validar os campos de entrada
+        CTkToolTip(
+            self.btn_carregar_planilha,
+            message="Selecione um arquivo Excel (.xlsx).\n A planilha deve ter os Part Numbers na coluna A, começando da segunda linha.",
+        )
+        CTkToolTip(
+            self.btn_pasta,
+            message="Selecione a pasta que desejar para download ou processamento dos PDFs.",
+        )
+        CTkToolTip(
+            self.btn_baixar_todos,
+            message="Essa opção baixa todos os pedidos do portal do cliente.",
+        )
+        CTkToolTip(
+            self.btn_baixar_especifico,
+            message="Essa opção baixa apenas os pedidos específicos informados no campo 'Part Number(s)'.\nSe este campo estiver vazio, o aplicativo realizará o processo de download de todos os pedidos novos da plataforma.",
+        )
+        CTkToolTip(
+            self.btn_processar,
+            message="Essa opção processa os arquivos PDF que já foram baixados e estão na pasta selecionada.",
+        )
+        CTkToolTip(
+            self.btn_parar,
+            message="Essa opção interrompe qualquer processo em andamento.",
+        )
+
+    def carregar_planilha_pedidos(self):
+        tipos_arquivo = [("Arquivos Excel", "*.xlsx"), ("Todos os arquivos", "*.*")]
+        caminho_arquivo = filedialog.askopenfilename(
+            title="Selecione a planilha de Part Numbers", filetypes=tipos_arquivo
+        )
+        if not caminho_arquivo:
+            return
+        try:
+            df = pd.read_excel(
+                caminho_arquivo, usecols=[0], header=None, skiprows=1, engine="openpyxl"
+            )
+            pedidos = df.iloc[:, 0].dropna().astype(str).tolist()
+            if not pedidos:
+                messagebox.showwarning(
+                    "Planilha Vazia",
+                    "Nenhum Part Number encontrado na coluna A da planilha.",
+                )
+                return
+            self.entry_pedido.delete(0, ctk.END)
+            self.entry_pedido.insert(0, "; ".join(pedidos))
+            self.atualizar_status(
+                f"{len(pedidos)} Part Numbers carregados da planilha.", "green"
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Erro ao Ler Planilha", f"Não foi possível ler o arquivo:\n{e}"
+            )
+            traceback.print_exc()
+
+    def _obter_lista_de_pedidos(self):
+        pedido_texto = self.entry_pedido.get().strip()
+        if not pedido_texto:
+            return []
+        return [p.strip() for p in re.split(r"[,;]", pedido_texto) if p.strip()]
+
     def _validar_campos(self, verificar_login=True):
         erros = []
         if verificar_login:
@@ -896,85 +859,75 @@ class App(ctk.CTk):
                 erros.append("Senha é obrigatória.")
             if not self.entry_codigo.get():
                 erros.append("Código autenticador é obrigatório.")
-
         if not self.entry_pdf_path.get():
             erros.append("Caminho da pasta é obrigatório.")
         if not self.entry_email.get():
             erros.append("E-mail para cópia é obrigatório.")
-
         if erros:
-            mensagem = "Erros de Validação:\n- " + "\n- ".join(erros)
-            messagebox.showerror("Campos Inválidos", mensagem)
+            messagebox.showerror(
+                "Campos Inválidos", "Erros de Validação:\n- " + "\n- ".join(erros)
+            )
             return False
-
-        # Atualiza os dados na classe de tratamento
         self.tratamento.cc_mail = self.entry_email.get()
         self.tratamento.caminho_pasta_pdf = self.entry_pdf_path.get()
         self.tratamento.caminho_saida_excel = os.path.join(
-            self.tratamento.caminho_pasta_pdf, "Ajuste_Pedidos.xlsx"
+            self.tratamento.caminho_pasta_pdf, "Order_Adjustments.xlsx"
         )
         return True
 
-    # ---> Função para iniciar o download dos PDFs
-    def iniciar_download(self):
+    def iniciar_download(self, modo):
         if not self._validar_campos(verificar_login=True):
             return
-
+        lista_pedidos, log_rotina = [], ""
+        if modo == "todos":
+            log_rotina = "RPA Orders - Download de todos os pedidos"
+        elif modo == "especificos":
+            lista_pedidos = self._obter_lista_de_pedidos()
+            log_rotina = (
+                "RPA Orders - Download de pedidos novos"
+                if not lista_pedidos
+                else "RPA Orders - Download de pedidos específicos"
+            )
         self._configurar_botoes_para_rodar(True)
-
-        pedido_texto = self.entry_pedido.get().strip()
-        if pedido_texto:
-            lista_pedidos = [
-                p.strip() for p in re.split(r"[,;]", pedido_texto) if p.strip()
-            ]
-        else:
-            lista_pedidos = []
-
         automator = AutomacaoPedidos(
             tratamento_dados=self.tratamento,
             evento_parar=self.evento_parar,
             login=self.entry_login.get(),
             senha=self.entry_senha.get(),
             autenticador=self.entry_codigo.get(),
-            pedido_especifico=lista_pedidos,
+            pedidos_especificos=lista_pedidos,
+            modo=modo,
         )
         self.automation_thread = threading.Thread(
             target=self.executar_e_atualizar_ui,
-            args=(automator.executar, "Download e Renomeação de PDFs"),
+            args=(automator.executar, log_rotina),
             daemon=True,
         )
         self.automation_thread.start()
 
-    # ---> Função para iniciar o processamento dos PDFs baixados
     def iniciar_processamento(self):
         if not self._validar_campos(verificar_login=False):
             return
         self._configurar_botoes_para_rodar(True)
-
         self.automation_thread = threading.Thread(
             target=self.executar_e_atualizar_ui,
             args=(
                 self.tratamento.processar_arquivos_baixados,
-                "Processamento de PDFs",
+                "RPA Orders - Processamento de PDFs",
                 self.evento_parar,
             ),
             daemon=True,
         )
         self.automation_thread.start()
 
-    # ---> Função que CRIA O LOG da automação
     def _criar_log(self, rotina, quantidade_itens, base_name):
         try:
-            tempo_download_humano_por_item = 90
-            tempo_preenchimento_humano_por_item = 90
-
-            if rotina == "Processamento de PDFs - Pedidos":
+            total_tempo_humano_por_item = 0
+            tempo_download_humano_por_item, tempo_preenchimento_humano_por_item = 90, 90
+            if "Processamento" in rotina:
                 total_tempo_humano_por_item = tempo_preenchimento_humano_por_item
-            else:
-                total_tempo_humano_por_item = (
-                    tempo_download_humano_por_item + tempo_preenchimento_humano_por_item
-                )
-
+            elif "Download" in rotina:
+                total_tempo_humano_por_item = tempo_download_humano_por_item
             tempo_bot_fixo_segundos = 45
             df_log = pd.DataFrame(
                 {
@@ -991,99 +944,183 @@ class App(ctk.CTk):
             caminho_do_log = cria_proximo_arquivo(
                 folder_path=self.tratamento.caminho_log, base_name=base_name
             )
-
             if not caminho_do_log:
                 print("Erro: Não foi possível gerar um nome de arquivo de log.")
                 return
-
             df_log.to_csv(caminho_do_log, index=False, sep=";", encoding="utf-8-sig")
             print(f"Log salvo com sucesso em: {caminho_do_log}")
-
         except Exception as e:
             print(f"Erro ao salvar log: {e}")
             traceback.print_exc()
 
-    # ---> Função que executa a automação em uma thread separada
     def executar_e_atualizar_ui(self, funcao_alvo, rotina, *args_para_funcao):
-        self.atualizar_status("Iniciando processo...", "cyan")
-        resultado = {}
-        contagem_final = 0
-
+        self.atualizar_status(f"Executando: {rotina}...", "#3498DB")
         start_time = datetime.now()
-
+        resultado_completo = {}
         try:
-            sucesso, mensagem, contagem_final = funcao_alvo(*args_para_funcao)
-            resultado = {"sucesso": sucesso, "mensagem": mensagem}
-
+            resultado_completo = funcao_alvo(*args_para_funcao)
         except Exception as e:
             traceback.print_exc()
-            resultado = {"sucesso": False, "mensagem": f"Erro crítico na thread: {e}"}
-
+            resultado_completo = {
+                "sucesso": False,
+                "mensagem": f"Erro crítico na thread: {e}",
+                "quantidade": 0,
+            }
         finally:
             end_time = datetime.now()
             tempo_total = (end_time - start_time).total_seconds()
             print(f"INFO: Tempo real de execução foi de {tempo_total:.2f} segundos.")
-
+            contagem_final = resultado_completo.get("quantidade", 0)
             if contagem_final > 0:
-                log_base_name = "data"
-                self._criar_log(rotina, contagem_final, log_base_name)
-                print(
-                    f"Log de execução criado para {contagem_final} item(ns) verificado(s)."
-                )
+                self._criar_log(rotina, contagem_final, "data")
             else:
-                print(
-                    f"Log não foi criado pois nenhum item foi processado (Itens: {contagem_final})."
-                )
+                print(f"Nenhum item foi processado (Itens: {contagem_final}).")
+            self.after(0, self.finalizar_automacao, resultado_completo)
 
-            self.after(0, self.finalizar_automacao, resultado)
-
-    # ---> Função para finalizar a automação e atualizar a UI
     def finalizar_automacao(self, resultado):
-        mensagem = resultado.get("mensagem", "Ocorreu um erro desconhecido.")
-        cor = "green" if resultado.get("sucesso") else "red"
-
+        mensagem, cor = resultado.get("mensagem", "Ocorreu um erro desconhecido."), (
+            "green" if resultado.get("sucesso") else "red"
+        )
         if self.evento_parar.is_set():
-            mensagem = "Automação interrompida pelo usuário."
-            cor = "orange"
-
+            mensagem, cor = "Automação interrompida pelo usuário.", "orange"
         self.atualizar_status(mensagem, cor)
-
-        if resultado.get("sucesso"):
-            messagebox.showinfo("Sucesso", mensagem)
-        elif not self.evento_parar.is_set():
-            messagebox.showerror("Erro", mensagem)
-
+        if not self.evento_parar.is_set():
+            self._enviar_email_notificacao(resultado)
+            if resultado.get("sucesso"):
+                messagebox.showinfo("Sucesso", mensagem)
+            else:
+                if (
+                    "O caminho especificado para os PDFs não é uma pasta válida"
+                    not in mensagem
+                ):
+                    messagebox.showerror("Erro", mensagem)
         self._configurar_botoes_para_rodar(False)
 
-    # ---> Função para parar a automação
+    def _enviar_email_notificacao(self, resultado):
+        tipo_email = resultado.get("tipo_email")
+        if not tipo_email:
+            return
+
+        pedidos_sucesso = resultado.get("pedidos_sucesso", [])
+        pedidos_falha = resultado.get("pedidos_falha", [])
+
+        if (
+            not pedidos_sucesso
+            and not pedidos_falha
+            and not resultado.get("pedidos_existentes")
+        ):
+            print("Nenhum item para relatar, e-mail não enviado.")
+            return
+
+        try:
+            outlook = Dispatch("outlook.application")
+            mail = outlook.CreateItem(0)
+
+            mail.To = self.tratamento.user_mail
+            mail.CC = self.tratamento.cc_mail
+
+            subject_parts = []
+            if pedidos_sucesso:
+                subject_parts.append("SUCESSO")
+            if tipo_email == "processamento" and resultado.get("pedidos_existentes"):
+                subject_parts.append("AVISO")
+            if pedidos_falha:
+                subject_parts.append("FALHA")
+
+            status_subject = "/".join(subject_parts) if subject_parts else "INFO"
+            data_hoje = datetime.now().strftime("%d/%m/%Y")
+            html_body = ["<p>Olá,</p>"]
+
+            if tipo_email == "processamento":
+                mail.Subject = f"Processamento de PDFs - {status_subject} - {data_hoje}"
+                qtde_sucesso = len(pedidos_sucesso)
+                qtde_falha = len(pedidos_falha)
+                qtde_existentes = len(resultado.get("pedidos_existentes", set()))
+                total = qtde_sucesso + qtde_falha + qtde_existentes
+                html_body.append(
+                    f"<p>A rotina de <b>processamento de PDFs</b> foi finalizada. {total} arquivo(s) verificado(s).</p>"
+                )
+                if qtde_sucesso > 0:
+                    html_body.append(
+                        f'<p><b style="color:green;">{qtde_sucesso} arquivo(s) processado(s) com sucesso.</b></p>'
+                    )
+                if qtde_existentes > 0:
+                    html_body.append(
+                        f'<p><b style="color:orange;">{qtde_existentes} arquivo(s) não foram movidos pois já existem no destino.</b></p>'
+                    )
+                if qtde_falha > 0:
+                    html_body.append(
+                        f'<p><b style="color:red;">{qtde_falha} arquivo(s) falharam no processamento.</b></p>'
+                    )
+                if qtde_sucesso > 0 and os.path.exists(
+                    self.tratamento.caminho_saida_excel
+                ):
+                    mail.Attachments.Add(
+                        os.path.abspath(self.tratamento.caminho_saida_excel)
+                    )
+
+            elif tipo_email in ["download_especifico", "download_todos"]:
+                titulo_rotina = (
+                    "Download de Pedidos Específicos"
+                    if tipo_email == "download_especifico"
+                    else "Download de Todos os Pedidos"
+                )
+                mail.Subject = f"{titulo_rotina} - {status_subject} - {data_hoje}"
+                qtde_sucesso = len(pedidos_sucesso)
+                qtde_falha = len(pedidos_falha)
+                total = qtde_sucesso + qtde_falha
+                html_body.append(
+                    f"<p>A rotina de <b>{titulo_rotina}</b> foi finalizada. {total} download(s) tentado(s).</p>"
+                )
+                if qtde_sucesso > 0:
+                    html_body.append(
+                        f'<p><b style="color:green;">{qtde_sucesso} arquivo(s) baixado(s) com sucesso.</b></p>'
+                    )
+                if qtde_falha > 0:
+                    html_body.append(
+                        f'<p><b style="color:red;">{qtde_falha} item/itens não puderam ser baixados.</b> Consulte o relatório em anexo.</p>'
+                    )
+                caminho_relatorio = resultado.get("caminho_relatorio")
+                if caminho_relatorio and os.path.exists(caminho_relatorio):
+                    mail.Attachments.Add(caminho_relatorio)
+
+            html_body.append("<br><p>Atenciosamente,<br>Automation Bot</p>")
+
+            mail.HTMLBody = "".join(html_body)
+            mail.Send()
+
+            print("Email de status enviado com sucesso!")
+
+        except Exception as e:
+            print(f"Ocorreu um erro ao tentar enviar o e-mail: {e}")
+            messagebox.showerror(
+                "Erro de Email", f"Não foi possível enviar o e-mail de notificação: {e}"
+            )
+
     def parar_automacao(self):
         if self.automation_thread and self.automation_thread.is_alive():
             self.evento_parar.set()
-            self.atualizar_status("Sinal de parada enviado...", "orange")
+            self.atualizar_status(
+                "Sinal de parada enviado... Aguardando finalização.", "orange"
+            )
 
-    # ---> Função para configurar o estado dos botões
     def _configurar_botoes_para_rodar(self, rodando=True):
+        state = "disabled" if rodando else "normal"
+        self.btn_baixar_todos.configure(state=state)
+        self.btn_baixar_especifico.configure(state=state)
+        self.btn_processar.configure(state=state)
+        self.btn_parar.configure(state="normal" if rodando else "disabled")
         if rodando:
-            self.btn_baixar.configure(state="disabled")
-            self.btn_processar.configure(state="disabled")
-            self.btn_parar.configure(state="normal")
             self.evento_parar.clear()
-        else:
-            self.btn_baixar.configure(state="normal")
-            self.btn_processar.configure(state="normal")
-            self.btn_parar.configure(state="disabled")
 
-    # ---> Função para atualizar o status na interface
     def atualizar_status(self, texto, cor):
         self.return_user.configure(text=texto, text_color=cor)
 
-    # ---> Função para mostrar/ocultar senha
     def mostrar_senha(self):
         self.entry_senha.configure(
             show="" if self.entry_senha.cget("show") == "*" else "*"
         )
 
-    # ---> Função para selecionar pasta de PDFs
     def selecionar_pasta(self):
         pasta_selecionada = filedialog.askdirectory()
         if pasta_selecionada:
@@ -1091,7 +1128,6 @@ class App(ctk.CTk):
             self.entry_pdf_path.insert(0, pasta_selecionada)
 
 
-# ---> Looping aplicativo
 if __name__ == "__main__":
     app = App()
     app.mainloop()
